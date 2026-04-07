@@ -2,7 +2,7 @@
 
 Last updated: 2026-04-07
 Current branch: main
-Latest pushed commit at status refresh: 4a94ec4
+Latest pushed commit at status refresh: b7d0de3
 
 ## Pipeline Completion Summary
 
@@ -28,8 +28,8 @@ Implemented end-to-end flow:
 | Source ingestion | Partial | Four marketplace adapters are active; retries/backoff + parse completeness checks and per-source fixture fallback are in `apps/api/app/services/pipeline.py`. | Harden parser selectors with fixture regression tests and anti-block mitigation. |
 | Normalization | Partial | Canonical upsert and dedupe by source/source_listing_id are stable. | Expand source-specific normalization (seller, shipping, fee, provenance details). |
 | Classification | Partial | Rule-based classification, condition flags, lot estimation, and confidence components in `apps/api/app/services/pipeline.py`. | Add image-assisted taxonomy resolver and richer uncertainty labels. |
-| Resale valuation | Partial | `apps/api/app/services/pricing_models.py` now reads baseline artifact `models/resale/baseline_v1.json` with heuristic fallback. | Scale historical data, evaluate calibration, add promotion/versioning workflow. |
-| Auction prediction | Partial | `apps/api/app/services/pricing_models.py` reads baseline artifact `models/yahoo-auction/baseline_v1.json` with fallback logic. | Add richer feature set and lower-tail calibration monitoring. |
+| Resale valuation | Partial | `apps/api/app/services/pricing_models.py` reads baseline artifact `models/resale/baseline_v1.json` with heuristic fallback, and retrain flow now runs evaluation gates. | Scale historical data and add artifact promotion/versioning workflow with richer calibration reports. |
+| Auction prediction | Partial | `apps/api/app/services/pricing_models.py` reads baseline artifact `models/yahoo-auction/baseline_v1.json` with fallback logic, and retrain flow now runs evaluation gates. | Add richer feature set and time-window-aware calibration tracking. |
 | Proxy/coupon engine | Partial | `proxy_pricing_policy` + `coupon_rule` tables drive deal-cost estimation via `apps/api/app/services/proxy_tracker.py`. | Build admin sync/update flow for policy rules and coupon lifecycle. |
 | Deal scoring | Partial | Confidence-weighted profit scoring and bucketing are persisted and report-ready. | Tune weights with outcome data from review loop and realized results. |
 | Storage and schema | Partial | Added migration `alembic/versions/9d51f7c2a6e1_add_review_snapshot_and_policy_tables.py` for snapshots, images, policies, coupons, reviews, training examples. | Add artifact metadata table and retention/compaction jobs. |
@@ -52,11 +52,13 @@ Recent local validation confirmed:
   - `data/labeled/yahoo_auction_outcomes.csv`
   - `models/resale/baseline_v1.json`
   - `models/yahoo-auction/baseline_v1.json`
+  - `models/eval/baseline_eval_v1.json`
+- Evaluation gate run passes on current baseline dataset.
 
 ## Next Priority Work
 
 1. Add parser regression test suite with source HTML fixtures and completeness assertions.
 2. Add ingestion/model drift metrics and alert thresholds.
-3. Expand historical datasets (Pen_Swap + Yahoo outcomes) and add train/eval report gating.
+3. Expand historical datasets (Pen_Swap + Yahoo outcomes) and add richer eval-report trend tracking.
 4. Implement full MCP SDK servers for browser/pricing services.
 5. Build review history and outcome analytics UI to drive score calibration.

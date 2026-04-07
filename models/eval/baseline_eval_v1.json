@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-04-07T19:16:34.866313+00:00",
+  "gates": {
+    "overall_pass": true,
+    "resale_pass": true,
+    "auction_pass": true,
+    "min_rows": 5,
+    "resale_max_mape": 0.5,
+    "auction_max_mape": 0.4
+  },
+  "metrics": {
+    "resale": {
+      "rows": 8,
+      "mape": 0.0649
+    },
+    "auction": {
+      "rows": 8,
+      "mape": 0.0214
+    }
+  }
+}

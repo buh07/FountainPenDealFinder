@@ -64,6 +64,10 @@ class Settings(BaseSettings):
 
     resale_model_artifact_path: str = "models/resale/baseline_v1.json"
     auction_model_artifact_path: str = "models/yahoo-auction/baseline_v1.json"
+    baseline_eval_report_path: str = "models/eval/baseline_eval_v1.json"
+    baseline_eval_min_rows: int = 5
+    baseline_eval_resale_max_mape: float = 0.5
+    baseline_eval_auction_max_mape: float = 0.4
 
     fixture_listings_path: str = "data/fixtures/listings_sample.json"
     reports_dir: str = "data/reports"

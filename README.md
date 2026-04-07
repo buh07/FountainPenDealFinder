@@ -124,7 +124,27 @@ python -m http.server 8080 -d apps/dashboard/public
 ```bash
 python scripts/build_historical_datasets.py
 python scripts/train_baseline_models.py
+python scripts/evaluate_baseline_models.py --report-path models/eval/baseline_eval_v1.json
 ```
+
+1. Run the same build/train/evaluate pipeline through API:
+
+```bash
+curl -X POST http://localhost:8000/retrain/jobs
+```
+
+## Baseline Model Gate
+
+- Retrain jobs now run three steps: dataset build, training, and evaluation gate.
+- Evaluation report is written to `BASELINE_EVAL_REPORT_PATH` (default: `models/eval/baseline_eval_v1.json`).
+- Retrain endpoint returns `status=error` if evaluation gates fail.
+
+Gate-related `.env` settings:
+
+- `BASELINE_EVAL_REPORT_PATH`
+- `BASELINE_EVAL_MIN_ROWS`
+- `BASELINE_EVAL_RESALE_MAX_MAPE`
+- `BASELINE_EVAL_AUCTION_MAX_MAPE`
 
 ## Migration Commands
 

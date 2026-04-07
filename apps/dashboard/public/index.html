@@ -3,54 +3,263 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FountainPenDealFinder Dashboard</title>
+    <title>FountainPenDealFinder Review Dashboard</title>
     <style>
       :root {
-        --bg: #f6f2ea;
+        --bg: #f5efe6;
         --ink: #1f1a17;
-        --accent: #b34a22;
-        --card: #fffdf8;
+        --accent: #9b3815;
+        --card: #fffaf2;
       }
+
       body {
         margin: 0;
         font-family: "Iowan Old Style", "Palatino Linotype", serif;
-        background: radial-gradient(circle at top right, #fbe4c8, var(--bg) 45%);
         color: var(--ink);
+        background: radial-gradient(circle at top right, #f8dfbf, var(--bg) 50%);
       }
+
       main {
-        max-width: 920px;
+        max-width: 1040px;
         margin: 0 auto;
-        padding: 32px 18px 60px;
+        padding: 24px 16px 50px;
       }
+
       h1 {
         margin: 0 0 8px;
       }
-      .card {
+
+      .controls {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 10px;
+        margin: 16px 0;
+      }
+
+      .controls input,
+      .controls button,
+      select,
+      textarea {
+        font: inherit;
+      }
+
+      .controls input,
+      select,
+      textarea {
+        border: 1px solid #d4c0a0;
+        border-radius: 10px;
+        padding: 8px 10px;
+        background: #fff;
+      }
+
+      .controls button,
+      .submit-btn {
+        border: 0;
+        border-radius: 10px;
+        background: var(--accent);
+        color: #fff;
+        padding: 9px 12px;
+        cursor: pointer;
+      }
+
+      .status {
+        min-height: 24px;
+        margin-bottom: 10px;
+        color: #5f2310;
+      }
+
+      .listing-card {
         background: var(--card);
-        border: 1px solid #e7d8c3;
+        border: 1px solid #e4cfaf;
         border-radius: 14px;
-        padding: 16px;
+        padding: 14px;
         margin: 14px 0;
       }
+
+      .meta {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 6px 12px;
+        font-size: 14px;
+      }
+
       .tag {
         display: inline-block;
+        border-radius: 999px;
+        padding: 3px 9px;
+        font-size: 12px;
         background: #ffe0d2;
         color: #6f2309;
-        borde -radius: 999px;
-        padding: 4px 10px;
-        font-size: 12px;
+      }
+
+      .review-row {
+        margin-top: 12px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .review-row textarea {
+        grid-column: 1 / -1;
+        min-height: 72px;
+      }
+
+      .review-row .submit-btn {
+        justify-self: start;
+      }
+
+      @media (max-width: 720px) {
+        .controls {
+          grid-template-columns: 1fr;
+        }
+
+        .review-row {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
   <body>
     <main>
-      <h1>FountainPenDealFinder</h1>
-      <p>V1 review dashboard scaffold.</p>
-      <div class="card">
-        <span class="tag">confident</span>
-        <h3>Pilot Custom 743 14K M</h3>
-        <p>Expected profit: 34,500 JPY (66.9%)</p>
+      <h1>FountainPenDealFinder Review</h1>
+      <p>Load scored listings and submit manual-review feedback into the training queue.</p>
+
+      <div class="controls">
+        <input id="apiBase" value="http://localhost:8000" aria-label="API Base URL" />
+        <input id="limit" type="number" value="20" min="1" max="100" aria-label="Listing limit" />
+        <button id="loadBtn">Load Listings</button>
       </div>
+
+      <div class="status" id="status"></div>
+      <section id="listings"></section>
     </main>
+
+    <script>
+      const ACTION_OPTIONS = [
+        "confirm_classification",
+        "correct_classification",
+        "mark_fake_suspicious",
+        "mark_condition_worse",
+        "mark_purchased",
+        "mark_sold_too_fast",
+        "mark_not_worth_it",
+      ];
+
+      const statusEl = document.getElementById("status");
+      const listingsEl = document.getElementById("listings");
+
+      function setStatus(message) {
+        statusEl.textContent = message;
+      }
+
+      async function loadListings() {
+        const apiBase = document.getElementById("apiBase").value.trim();
+        const limit = Number(document.getElementById("limit").value || 20);
+
+        setStatus("Loading listings...");
+        listingsEl.innerHTML = "";
+
+        const url = `${apiBase}/listings?limit=${encodeURIComponent(limit)}`;
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to load listings: ${response.status}`);
+        }
+        const payload = await response.json();
+
+        if (!payload.items || payload.items.length === 0) {
+          setStatus("No scored listings found yet.");
+          return;
+        }
+
+        setStatus(`Loaded ${payload.items.length} listing(s).`);
+        for (const item of payload.items) {
+          listingsEl.appendChild(renderListingCard(apiBase, item));
+        }
+      }
+
+      function renderListingCard(apiBase, item) {
+        const card = document.createElement("article");
+        card.className = "listing-card";
+
+        const actionOptions = ACTION_OPTIONS.map(
+          (value) => `<option value="${value}">${value}</option>`
+        ).join("");
+
+        card.innerHTML = `
+          <span class="tag">${item.deal_bucket}</span>
+          <h3>${item.listing_title}</h3>
+          <div class="meta">
+            <div><strong>Listing ID:</strong> ${item.listing_id}</div>
+            <div><strong>Source:</strong> ${item.marketplace}</div>
+            <div><strong>Profit:</strong> ${item.expected_profit_jpy} JPY</div>
+            <div><strong>Profit %:</strong> ${(item.expected_profit_pct * 100).toFixed(1)}%</div>
+            <div><strong>Confidence:</strong> ${(item.confidence * 100).toFixed(1)}%</div>
+            <div><strong>Proxy:</strong> ${item.recommended_proxy}</div>
+          </div>
+          <p><a href="${item.listing_url}" target="_blank" rel="noopener">Open listing</a></p>
+
+          <div class="review-row">
+            <select class="review-action">${actionOptions}</select>
+            <input class="review-classification" placeholder="corrected classification id (optional)" />
+            <input class="review-condition" placeholder="corrected condition grade (optional)" />
+            <input class="review-reviewer" value="self" placeholder="reviewer" />
+            <textarea class="review-notes" placeholder="notes"></textarea>
+            <button class="submit-btn">Submit Review</button>
+          </div>
+        `;
+
+        const submitBtn = card.querySelector(".submit-btn");
+        submitBtn.addEventListener("click", async () => {
+          submitBtn.disabled = true;
+          try {
+            const actionType = card.querySelector(".review-action").value;
+            const correctedClassificationId = card.querySelector(".review-classification").value.trim();
+            const correctedConditionGrade = card.querySelector(".review-condition").value.trim();
+            const reviewer = card.querySelector(".review-reviewer").value.trim() || "self";
+            const notes = card.querySelector(".review-notes").value.trim();
+
+            const body = {
+              action_type: actionType,
+              corrected_classification_id: correctedClassificationId || null,
+              corrected_condition_grade: correctedConditionGrade || null,
+              is_false_positive: actionType === "mark_not_worth_it" || actionType === "mark_fake_suspicious",
+              was_purchased: actionType === "mark_purchased",
+              notes,
+              reviewer,
+            };
+
+            const reviewResponse = await fetch(`${apiBase}/review/${encodeURIComponent(item.listing_id)}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            });
+
+            if (!reviewResponse.ok) {
+              const text = await reviewResponse.text();
+              throw new Error(`Review failed: ${reviewResponse.status} ${text}`);
+            }
+
+            const reviewPayload = await reviewResponse.json();
+            setStatus(
+              `Saved review ${reviewPayload.review_id} and training example ${reviewPayload.training_example_id} for ${item.listing_id}.`
+            );
+          } catch (error) {
+            setStatus(String(error));
+          } finally {
+            submitBtn.disabled = false;
+          }
+        });
+
+        return card;
+      }
+
+      document.getElementById("loadBtn").addEventListener("click", async () => {
+        try {
+          await loadListings();
+        } catch (error) {
+          setStatus(String(error));
+        }
+      });
+    </script>
   </body>
 </html>

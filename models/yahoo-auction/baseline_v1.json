@@ -1,0 +1,20 @@
+{
+  "artifact": "auction_baseline",
+  "version": "v1",
+  "trained_at": "2026-04-07T19:02:07.326218+00:00",
+  "rows_used": 8,
+  "bid_bucket_expected_multipliers": {
+    "1_3": 1.3,
+    "4_7": 1.3547,
+    "8_plus": 1.4419
+  },
+  "bid_bucket_low_multipliers": {
+    "1_3": 1.2333,
+    "4_7": 1.2907,
+    "8_plus": 1.4419
+  },
+  "default_expected_multiplier": 1.3378,
+  "default_low_multiplier": 1.2333,
+  "max_resale_ratio": 0.92,
+  "confidence_base": 0.6
+}

@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..schemas import CollectRunRequest, CollectRunResponse
-from ..services.pipeline import run_collection_pipeline
+from ..schemas import CollectRunRequest, CollectRunResponse, EndingAuctionRefreshResponse
+from ..services.pipeline import run_collection_pipeline, run_ending_auction_refresh
 
 router = APIRouter(prefix="/collect", tags=["collect"])
 
@@ -27,4 +27,21 @@ def run_collect(
         potential_count=result["potential_count"],
         source_counts=result.get("source_counts", {}),
         report_path=result.get("report_path"),
+    )
+
+
+@router.post("/refresh-ending", response_model=EndingAuctionRefreshResponse)
+def refresh_ending_auctions(
+    window_hours: int = Query(default=24, ge=1, le=72),
+    db: Session = Depends(get_db),
+) -> EndingAuctionRefreshResponse:
+    started_at = datetime.now(timezone.utc)
+    result = run_ending_auction_refresh(db, window_hours=window_hours)
+    finished_at = datetime.now(timezone.utc)
+    return EndingAuctionRefreshResponse(
+        started_at=started_at,
+        finished_at=finished_at,
+        ingested_count=result["ingested_count"],
+        scored_count=result["scored_count"],
+        window_hours=result["window_hours"],
     )

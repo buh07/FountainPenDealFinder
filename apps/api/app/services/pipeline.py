@@ -1,5 +1,7 @@
 import json
+import hashlib
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -16,6 +18,8 @@ from ..models import (
     AuctionPrediction,
     ClassificationResult,
     DealScore,
+    ListingImage,
+    ListingSnapshot,
     RawListing,
     ValuationPrediction,
 )
@@ -57,6 +61,61 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(deduped.values())
 
 
+def _row_completeness(payload: dict[str, Any]) -> float:
+    fields = [
+        bool(payload.get("source_listing_id") or payload.get("listing_id")),
+        bool(payload.get("url")),
+        bool(payload.get("title")),
+        bool(payload.get("listing_format") or payload.get("listing_type")),
+        (
+            payload.get("current_price_jpy") is not None
+            or payload.get("price_buy_now_jpy") is not None
+        ),
+    ]
+    return sum(1 for field in fields if field) / max(1, len(fields))
+
+
+def _filter_parse_complete_rows(
+    rows: list[dict[str, Any]],
+    min_completeness: float,
+) -> list[dict[str, Any]]:
+    valid: list[dict[str, Any]] = []
+    for row in rows:
+        if _row_completeness(row) >= min_completeness:
+            valid.append(row)
+    return valid
+
+
+def _collect_with_retries(
+    fetch_fn,
+    attempts: int,
+    backoff_seconds: float,
+    min_completeness: float,
+    min_valid_rows: int,
+) -> list[dict[str, Any]]:
+    safe_attempts = max(1, attempts)
+    last_valid: list[dict[str, Any]] = []
+    for attempt_index in range(safe_attempts):
+        try:
+            fetched = fetch_fn()
+            candidate_rows = _filter_parse_complete_rows(
+                fetched if isinstance(fetched, list) else [],
+                min_completeness=min_completeness,
+            )
+            if len(candidate_rows) >= min_valid_rows:
+                return candidate_rows
+            last_valid = candidate_rows
+        except Exception:
+            pass
+
+        if attempt_index < safe_attempts - 1:
+            sleep_seconds = max(0.0, backoff_seconds) * (2**attempt_index)
+            if sleep_seconds > 0:
+                time.sleep(sleep_seconds)
+
+    return last_valid
+
+
 def load_marketplace_listings() -> list[dict[str, Any]]:
     settings = get_settings()
     now = datetime.now(timezone.utc)
@@ -73,19 +132,33 @@ def load_marketplace_listings() -> list[dict[str, Any]]:
         source_rows: list[dict[str, Any]] = []
 
         if enabled:
-            try:
-                source_rows.extend(adapter.get_fresh_window_listings(day_start, category="fountain_pen"))
-                if has_ending_auctions:
-                    source_rows.extend(
-                        adapter.get_ending_auctions(
+            source_rows.extend(
+                _collect_with_retries(
+                    fetch_fn=lambda: adapter.get_fresh_window_listings(
+                        day_start,
+                        category="fountain_pen",
+                    ),
+                    attempts=settings.ingestion_retry_attempts,
+                    backoff_seconds=settings.ingestion_retry_backoff_seconds,
+                    min_completeness=settings.ingestion_parse_min_completeness,
+                    min_valid_rows=settings.ingestion_parse_min_valid_rows,
+                )
+            )
+
+            if has_ending_auctions:
+                source_rows.extend(
+                    _collect_with_retries(
+                        fetch_fn=lambda: adapter.get_ending_auctions(
                             window_start=now,
                             window_end=now + timedelta(hours=24),
                             category="fountain_pen",
-                        )
+                        ),
+                        attempts=settings.ingestion_retry_attempts,
+                        backoff_seconds=settings.ingestion_retry_backoff_seconds,
+                        min_completeness=settings.ingestion_parse_min_completeness,
+                        min_valid_rows=0,
                     )
-            except Exception:
-                # Keep ingestion alive when a source is blocked or parser changes.
-                pass
+                )
 
         if (not source_rows) and settings.use_fixture_fallback:
             source_rows.extend(
@@ -143,6 +216,41 @@ def load_marketplace_listings() -> list[dict[str, Any]]:
     return _dedupe_rows(rows)
 
 
+def load_ending_auction_rows(window_hours: int) -> list[dict[str, Any]]:
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    fixture = FixtureListingSourceAdapter()
+    rows: list[dict[str, Any]] = []
+
+    if settings.yahoo_auctions_enabled:
+        yahoo = YahooAuctionsAdapter()
+        rows.extend(
+            _collect_with_retries(
+                fetch_fn=lambda: yahoo.get_ending_auctions(
+                    window_start=now,
+                    window_end=now + timedelta(hours=max(1, window_hours)),
+                    category="fountain_pen",
+                ),
+                attempts=settings.ingestion_retry_attempts,
+                backoff_seconds=settings.ingestion_retry_backoff_seconds,
+                min_completeness=settings.ingestion_parse_min_completeness,
+                min_valid_rows=0,
+            )
+        )
+
+    if (not rows) and settings.use_fixture_fallback:
+        rows.extend(
+            fixture.get_ending_auctions(
+                window_start=now,
+                window_end=now + timedelta(hours=max(1, window_hours)),
+                category="fountain_pen",
+                source_filter="yahoo_auctions",
+            )
+        )
+
+    return _dedupe_rows(rows)
+
+
 def upsert_raw_listing(session: Session, payload: dict[str, Any]) -> RawListing:
     source = payload.get("source") or payload.get("marketplace") or "unknown"
     source_listing_id = str(payload.get("source_listing_id") or payload.get("listing_id") or "")
@@ -177,7 +285,77 @@ def upsert_raw_listing(session: Session, payload: dict[str, Any]) -> RawListing:
 
     session.add(existing)
     session.flush()
+
+    _upsert_listing_images(session, existing.listing_id, payload.get("images") or [])
+    _record_listing_snapshot(session, existing)
+
     return existing
+
+
+def _upsert_listing_images(session: Session, listing_id: str, images: list[Any]) -> None:
+    normalized: list[str] = []
+    for image in images:
+        value = str(image or "").strip()
+        if value:
+            normalized.append(value)
+
+    if not normalized:
+        return
+
+    existing_urls = {
+        row.image_url
+        for row in session.scalars(
+            select(ListingImage).where(ListingImage.listing_id == listing_id)
+        ).all()
+    }
+
+    for index, image_url in enumerate(normalized):
+        if image_url in existing_urls:
+            continue
+        session.add(
+            ListingImage(
+                listing_id=listing_id,
+                image_url=image_url,
+                image_order=index,
+            )
+        )
+
+    session.flush()
+
+
+def _record_listing_snapshot(session: Session, listing: RawListing) -> None:
+    snapshot_payload = {
+        "current_price_jpy": listing.current_price_jpy,
+        "price_buy_now_jpy": listing.price_buy_now_jpy,
+        "bid_count": listing.bid_count,
+        "ends_at": listing.ends_at.isoformat() if listing.ends_at else None,
+        "raw_attributes_json": listing.raw_attributes_json,
+    }
+    snapshot_hash = hashlib.sha256(
+        json.dumps(snapshot_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    exists = session.scalar(
+        select(ListingSnapshot.snapshot_id).where(
+            ListingSnapshot.listing_id == listing.listing_id,
+            ListingSnapshot.snapshot_hash == snapshot_hash,
+        )
+    )
+    if exists:
+        return
+
+    session.add(
+        ListingSnapshot(
+            listing_id=listing.listing_id,
+            snapshot_hash=snapshot_hash,
+            current_price_jpy=listing.current_price_jpy,
+            price_buy_now_jpy=listing.price_buy_now_jpy,
+            bid_count=listing.bid_count,
+            ends_at=listing.ends_at,
+            raw_attributes_json=listing.raw_attributes_json,
+        )
+    )
+    session.flush()
 
 
 BRAND_KEYWORDS = {
@@ -515,6 +693,7 @@ def score_single_listing(session: Session, listing: RawListing) -> dict[str, Any
         else (listing.price_buy_now_jpy or listing.current_price_jpy)
     )
     proxy_payloads = estimate_proxy_deals(
+        session,
         listing,
         buy_price_jpy=int(buy_price_for_proxy or 0),
         resale_reference_jpy=int(valuation_payload["resale_pred_jpy"]),
@@ -567,6 +746,29 @@ def run_collection_pipeline(session: Session, report_date: date | None = None) -
         "potential_count": len(report.potential),
         "source_counts": source_counts,
         "report_path": report.report_path,
+    }
+
+
+def run_ending_auction_refresh(
+    session: Session,
+    window_hours: int,
+) -> dict[str, Any]:
+    source_rows = load_ending_auction_rows(window_hours=window_hours)
+
+    ingested_count = 0
+    scored_count = 0
+    for payload in source_rows:
+        listing = upsert_raw_listing(session, payload)
+        artifacts = score_single_listing(session, listing)
+        ingested_count += 1
+        if artifacts["deal_score"].bucket != "discard":
+            scored_count += 1
+
+    session.commit()
+    return {
+        "ingested_count": ingested_count,
+        "scored_count": scored_count,
+        "window_hours": window_hours,
     }
 
 

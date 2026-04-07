@@ -158,6 +158,90 @@ class ProxyOptionEstimate(Base):
     )
 
 
+class ProxyPricingPolicy(Base):
+    __tablename__ = "proxy_pricing_policy"
+
+    policy_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    proxy_name: Mapped[str] = mapped_column(String(64), index=True)
+    marketplace_source: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    service_fee_jpy: Mapped[int] = mapped_column(Integer, default=0)
+    intl_shipping_jpy: Mapped[int] = mapped_column(Integer, default=0)
+    min_buy_price_jpy: Mapped[int] = mapped_column(Integer, default=0)
+    max_buy_price_jpy: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+
+class CouponRule(Base):
+    __tablename__ = "coupon_rule"
+
+    coupon_rule_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    proxy_name: Mapped[str] = mapped_column(String(64), index=True)
+    marketplace_source: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    coupon_id: Mapped[str] = mapped_column(String(128), index=True)
+    discount_type: Mapped[str] = mapped_column(String(32), default="flat_jpy")
+    discount_value: Mapped[float] = mapped_column(Float, default=0.0)
+    min_buy_price_jpy: Mapped[int] = mapped_column(Integer, default=0)
+    max_discount_jpy: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_stackable: Mapped[bool] = mapped_column(Boolean, default=False)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    starts_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+
+class ListingSnapshot(Base):
+    __tablename__ = "listing_snapshot"
+    __table_args__ = (
+        UniqueConstraint("listing_id", "snapshot_hash", name="uq_listing_snapshot_hash"),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    listing_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("raw_listing.listing_id", ondelete="CASCADE"),
+        index=True,
+    )
+    snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
+    current_price_jpy: Mapped[int] = mapped_column(Integer, default=0)
+    price_buy_now_jpy: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bid_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    raw_attributes_json: Mapped[str] = mapped_column(Text, default="{}")
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+
+
+class ListingImage(Base):
+    __tablename__ = "listing_image"
+    __table_args__ = (
+        UniqueConstraint("listing_id", "image_url", name="uq_listing_image_url"),
+    )
+
+    image_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    listing_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("raw_listing.listing_id", ondelete="CASCADE"),
+        index=True,
+    )
+    image_url: Mapped[str] = mapped_column(String(2048))
+    image_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class DealScore(Base):
     __tablename__ = "deal_score"
 
@@ -208,3 +292,44 @@ class ReportItem(Base):
     )
     bucket: Mapped[str] = mapped_column(String(16), index=True)
     rank_position: Mapped[int] = mapped_column(Integer)
+
+
+class ManualReview(Base):
+    __tablename__ = "manual_review"
+
+    review_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    listing_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("raw_listing.listing_id", ondelete="CASCADE"),
+        index=True,
+    )
+    action_type: Mapped[str] = mapped_column(String(64), index=True)
+    corrected_classification_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    corrected_condition_grade: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    is_false_positive: Mapped[bool] = mapped_column(Boolean, default=False)
+    was_purchased: Mapped[bool] = mapped_column(Boolean, default=False)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    reviewer: Mapped[str] = mapped_column(String(64), default="self")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class TrainingExample(Base):
+    __tablename__ = "training_example"
+
+    example_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    listing_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("raw_listing.listing_id", ondelete="CASCADE"),
+        index=True,
+    )
+    source_review_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("manual_review.review_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    task_type: Mapped[str] = mapped_column(String(64), default="classification", index=True)
+    label_json: Mapped[str] = mapped_column(Text, default="{}")
+    feature_json: Mapped[str] = mapped_column(Text, default="{}")
+    split: Mapped[str] = mapped_column(String(16), default="train")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

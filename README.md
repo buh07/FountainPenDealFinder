@@ -6,9 +6,9 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 
 - `apps/api`: FastAPI internal API
 - `apps/worker`: scheduled collection and scoring worker
-- `apps/dashboard`: lightweight review UI scaffold
-- `apps/mcp-browser`: MCP marketplace browser tool scaffold (TypeScript)
-- `apps/mcp-pricing`: MCP pricing/deal tool scaffold (TypeScript)
+- `apps/dashboard`: lightweight review UI
+- `apps/mcp-browser`: API-backed MCP-style browser wrapper (JavaScript)
+- `apps/mcp-pricing`: API-backed MCP-style pricing wrapper (JavaScript)
 - `packages/*`: shared modules and domain contracts
 - `data/*`: fixtures, taxonomy, labels, generated reports
 - `models/*`: model artifact placeholders
@@ -20,11 +20,15 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 - `GET /health`
 - `POST /collect/run`
 - `GET /listings`
+- `GET /listings/{listing_id}`
+- `POST /collect/refresh-ending`
 - `POST /score/{listing_id}`
 - `POST /predict/resale/{listing_id}`
 - `POST /predict/auction/{listing_id}`
 - `GET /proxy/listing/{listing_id}`
 - `GET /proxy/top`
+- `POST /review/{listing_id}`
+- `POST /retrain/jobs`
 - `GET /reports/daily/{date}`
 
 ## Source Ingestion Status
@@ -39,7 +43,35 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 
 - Pricing models are isolated in `apps/api/app/services/pricing_models.py` (resale + auction prediction).
 - Proxy economics and ranking are isolated in `apps/api/app/services/proxy_tracker.py`.
+- Proxy pricing/coupon logic is data-backed through `proxy_pricing_policy` and `coupon_rule` tables.
 - Score computation consumes proxy outputs (`expected_profit_jpy`, `expected_profit_pct`) rather than duplicating proxy math inline.
+
+## Worker Modes
+
+- One full run:
+
+```bash
+python -m apps.worker.worker --once
+```
+
+- One ending-auction refresh run:
+
+```bash
+python -m apps.worker.worker --ending-refresh-once --ending-window-hours 24
+```
+
+- Recurring scheduler loop:
+
+```bash
+python -m apps.worker.worker --daemon
+```
+
+Worker cadence defaults are configurable via `.env`:
+
+- `WORKER_FIXED_SOURCE_INTERVAL_SECONDS`
+- `WORKER_ENDING_AUCTIONS_INTERVAL_SECONDS`
+- `WORKER_IDLE_SLEEP_SECONDS`
+- `WORKER_ENDING_AUCTION_WINDOW_HOURS`
 
 ## Quick Start
 
@@ -75,10 +107,23 @@ make api
 curl -X POST http://localhost:8000/collect/run
 ```
 
-1. Open dashboard scaffold:
+1. Trigger ending-auctions-only refresh:
+
+```bash
+curl -X POST 'http://localhost:8000/collect/refresh-ending?window_hours=24'
+```
+
+1. Open dashboard review UI:
 
 ```bash
 python -m http.server 8080 -d apps/dashboard/public
+```
+
+1. Build historical datasets + train baseline artifacts:
+
+```bash
+python scripts/build_historical_datasets.py
+python scripts/train_baseline_models.py
 ```
 
 ## Migration Commands

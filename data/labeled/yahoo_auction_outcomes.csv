@@ -1,0 +1,9 @@
+source,brand,line,current_price_jpy,bid_count,hours_to_end,final_price_jpy,ended_at
+yahoo_auctions,Pilot,Custom 743,43000,4,6,55500,2026-02-04T21:00:00Z
+yahoo_auctions,Pilot,Custom 823,39000,6,5,53100,2026-02-11T21:00:00Z
+yahoo_auctions,Sailor,1911 Large,22000,2,8,28600,2026-02-13T21:00:00Z
+yahoo_auctions,Platinum,3776 Century,18000,3,4,23900,2026-02-15T21:00:00Z
+yahoo_auctions,Namiki,Yukari,91000,7,3,128000,2026-02-22T21:00:00Z
+yahoo_auctions,Montblanc,146,48000,5,7,64700,2026-02-25T21:00:00Z
+yahoo_auctions,Pelikan,M800,43000,8,5,62000,2026-03-02T21:00:00Z
+yahoo_auctions,Unknown,Lot,12000,1,6,14800,2026-03-05T21:00:00Z

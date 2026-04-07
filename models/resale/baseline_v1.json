@@ -1,0 +1,26 @@
+{
+  "artifact": "resale_baseline",
+  "version": "v1",
+  "trained_at": "2026-04-07T19:02:07.325774+00:00",
+  "rows_used": 8,
+  "default_multiplier": 1.6503,
+  "brand_multipliers": {
+    "Montblanc": 1.3846,
+    "Namiki": 1.6706,
+    "Pelikan": 1.6596,
+    "Pilot": 1.7253,
+    "Platinum": 1.6316,
+    "Sailor": 1.68,
+    "Unknown": 1.1333
+  },
+  "condition_penalties": {
+    "B": 1.009,
+    "B+": 1.0426,
+    "C": 0.839,
+    "Parts/Repair": 0.6867
+  },
+  "default_condition_penalty": 0.85,
+  "lot_item_uplift": 0.1333,
+  "ci_pct": 0.1,
+  "confidence_base": 0.57
+}

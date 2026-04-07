@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     confident_min: float = 0.75
     potential_min: float = 0.45
     use_fixture_fallback: bool = True
+    ingestion_retry_attempts: int = 3
+    ingestion_retry_backoff_seconds: float = 1.0
+    ingestion_parse_min_completeness: float = 0.55
+    ingestion_parse_min_valid_rows: int = 1
 
     yahoo_auctions_enabled: bool = True
     yahoo_auctions_base_url: str = "https://auctions.yahoo.co.jp"
@@ -51,6 +55,15 @@ class Settings(BaseSettings):
     rakuma_timeout_seconds: int = 20
     rakuma_verify_ssl: bool = True
     rakuma_request_interval_seconds: float = 0.0
+
+    worker_enable_scheduler: bool = False
+    worker_fixed_source_interval_seconds: int = 3600
+    worker_ending_auctions_interval_seconds: int = 900
+    worker_idle_sleep_seconds: int = 10
+    worker_ending_auction_window_hours: int = 24
+
+    resale_model_artifact_path: str = "models/resale/baseline_v1.json"
+    auction_model_artifact_path: str = "models/yahoo-auction/baseline_v1.json"
 
     fixture_listings_path: str = "data/fixtures/listings_sample.json"
     reports_dir: str = "data/reports"

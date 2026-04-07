@@ -6,6 +6,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 DealBucket = Literal["confident", "potential", "discard"]
 ListingType = Literal["auction", "buy_now"]
+ReviewAction = Literal[
+    "confirm_classification",
+    "correct_classification",
+    "mark_fake_suspicious",
+    "mark_condition_worse",
+    "mark_purchased",
+    "mark_sold_too_fast",
+    "mark_not_worth_it",
+]
 
 
 class ListingItem(BaseModel):
@@ -64,6 +73,14 @@ class CollectRunResponse(BaseModel):
     report_path: str | None = None
 
 
+class EndingAuctionRefreshResponse(BaseModel):
+    started_at: datetime
+    finished_at: datetime
+    ingested_count: int
+    scored_count: int
+    window_hours: int
+
+
 class DailyReportResponse(BaseModel):
     date: date
     generated_at: datetime
@@ -110,3 +127,28 @@ class ProxyDealsForListingResponse(BaseModel):
 class ProxyTopDealsResponse(BaseModel):
     total: int
     items: list[ProxyDealOption]
+
+
+class ManualReviewRequest(BaseModel):
+    action_type: ReviewAction
+    corrected_classification_id: str | None = None
+    corrected_condition_grade: str | None = None
+    is_false_positive: bool = False
+    was_purchased: bool = False
+    notes: str = ""
+    reviewer: str = "self"
+
+
+class ManualReviewResponse(BaseModel):
+    review_id: str
+    training_example_id: str
+    listing_id: str
+    action_type: ReviewAction
+    created_at: datetime
+
+
+class RetrainJobResponse(BaseModel):
+    started_at: datetime
+    finished_at: datetime
+    status: Literal["ok", "error"]
+    details: str

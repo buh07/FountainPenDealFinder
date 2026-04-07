@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..schemas import ListListingsResponse
-from ..services.reporting import list_ranked_listings
+from ..schemas import ListListingsResponse, ListingSummary
+from ..services.reporting import get_listing_summary, list_ranked_listings
 
 router = APIRouter(prefix="/listings", tags=["listings"])
 
@@ -17,3 +17,11 @@ def get_listings(
 ) -> ListListingsResponse:
     items = list_ranked_listings(db, source=source, bucket=bucket, limit=limit)
     return ListListingsResponse(total=len(items), items=items)
+
+
+@router.get("/{listing_id}", response_model=ListingSummary)
+def get_listing_by_id(listing_id: str, db: Session = Depends(get_db)) -> ListingSummary:
+    summary = get_listing_summary(db, listing_id)
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return summary

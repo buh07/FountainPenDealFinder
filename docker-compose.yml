@@ -7,26 +7,62 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: fountain_pen
-    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    st     ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    pack    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    ports    porfrom pydantic import BaseModel, Field
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fountain_pen"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
 
-DealBucket = Literal["confident", "potential"]
-ListingType = Literal["auction", "buy_now"]
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/fountain_pen
+      REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: >
+      sh -c "alembic upgrade head &&
+      python3 -m uvicorn apps.api.app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
 
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/fountain_pen
+      REDIS_URL: redis://redis:6379/0
+      PYTHONPATH: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: >
+      sh -c "alembic upgrade head &&
+      python3 -m apps.worker.worker --once"
+    profiles:
+      - worker
 
-class ListingSummary(BaseModel):
-    listing_id: str
-    marketplace: str
-    listing_title: str
-    listing_url: str
-    listing_type: ListingType
-    current_price_jpy: int = Field(ge=0)
-    estimated_total_buy_cost_jpy: int = Field(ge=0)
-    estimated_resale_price_jpy: int = Field(ge=0)
-    expected_profit_jpy: int
-    expected_profit_pct: float
-    confidence: float = Field(ge=0.0, le=1.0)
-    deal_bucket: DealBucket
-    listed_at: datetime | None = None
-    time_remaining: str | None = None
-    rationale: str
+volumes:
+  pgdata:

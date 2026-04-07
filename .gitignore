@@ -23,3 +23,5 @@ node_modules/
 !.env.example
 logs/
 artifacts/
+data/reports/*.md
+!data/reports/.gitkeep

@@ -1,0 +1,108 @@
+[
+  {
+    "source": "yahoo_auctions",
+    "source_listing_id": "ya-1001",
+    "url": "https://example.com/yahoo/ya-1001",
+    "title": "Pilot Custom 743 14K M 万年筆 美品",
+    "description_raw": "中古ですが目立った傷や汚れなし。コンバーター付き。",
+    "images": [
+      "https://images.example.com/ya-1001-1.jpg",
+      "https://images.example.com/ya-1001-2.jpg",
+      "https://images.example.com/ya-1001-3.jpg"
+    ],
+    "seller_id": "seller_a",
+    "seller_rating": 98.2,
+    "listing_format": "auction",
+    "current_price_jpy": 42000,
+    "price_buy_now_jpy": null,
+    "domestic_shipping_jpy": 1200,
+    "bid_count": 4,
+    "listed_at": "2026-04-07T02:00:00Z",
+    "ends_at": "2026-04-08T03:00:00Z",
+    "location_prefecture": "Tokyo",
+    "condition_text": "目立った傷や汚れなし",
+    "lot_size_hint": 1,
+    "raw_attributes": {
+      "category": "fountain_pen"
+    }
+  },
+  {
+    "source": "mercari",
+    "source_listing_id": "mc-2002",
+    "url": "https://example.com/mercari/mc-2002",
+    "title": "Sailor 1911L 21K F 万年筆",
+    "description_raw": "クリップにスレあり。箱なし。",
+    "images": [
+      "https://images.example.com/mc-2002-1.jpg",
+      "https://images.example.com/mc-2002-2.jpg"
+    ],
+    "seller_id": "seller_b",
+    "seller_rating": 96.0,
+    "listing_format": "buy_now",
+    "current_price_jpy": 28000,
+    "price_buy_now_jpy": 28000,
+    "domestic_shipping_jpy": 800,
+    "bid_count": null,
+    "listed_at": "2026-04-07T00:15:00Z",
+    "ends_at": null,
+    "location_prefecture": "Kanagawa",
+    "condition_text": "やや傷や汚れあり",
+    "lot_size_hint": 1,
+    "raw_attributes": {
+      "category": "fountain_pen"
+    }
+  },
+  {
+    "source": "rakuma",
+    "source_listing_id": "rk-3003",
+    "url": "https://example.com/rakuma/rk-3003",
+    "title": "万年筆 2本 セット Platinum 3776 + Unknown",
+    "description_raw": "まとめ売り。1本はペン先曲がりの可能性あり。",
+    "images": [
+      "https://images.example.com/rk-3003-1.jpg"
+    ],
+    "seller_id": "seller_c",
+    "seller_rating": 92.5,
+    "listing_format": "buy_now",
+    "current_price_jpy": 17000,
+    "price_buy_now_jpy": 17000,
+    "domestic_shipping_jpy": 1000,
+    "bid_count": null,
+    "listed_at": "2026-04-07T04:30:00Z",
+    "ends_at": null,
+    "location_prefecture": "Osaka",
+    "condition_text": "状態は写真確認",
+    "lot_size_hint": 2,
+    "raw_attributes": {
+      "category": "fountain_pen_lot"
+    }
+  },
+  {
+    "source": "yahoo_flea_market",
+    "source_listing_id": "yf-4004",
+    "url": "https://example.com/yf/yf-4004",
+    "title": "Namiki Yukari 蒔絵 万年筆",
+    "description_raw": "漆面に小キズあり。箱付き。",
+    "images": [
+      "https://images.example.com/yf-4004-1.jpg",
+      "https://images.example.com/yf-4004-2.jpg",
+      "https://images.example.com/yf-4004-3.jpg",
+      "https://images.example.com/yf-4004-4.jpg"
+    ],
+    "seller_id": "seller_d",
+    "seller_rating": 99.0,
+    "listing_format": "buy_now",
+    "current_price_jpy": 98000,
+    "price_buy_now_jpy": 98000,
+    "domestic_shipping_jpy": 1500,
+    "bid_count": null,
+    "listed_at": "2026-04-07T01:45:00Z",
+    "ends_at": null,
+    "location_prefecture": "Kyoto",
+    "condition_text": "やや傷や汚れあり",
+    "lot_size_hint": 1,
+    "raw_attributes": {
+      "category": "high_end_fountain_pen"
+    }
+  }
+]

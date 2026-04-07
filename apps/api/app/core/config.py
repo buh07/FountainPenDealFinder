@@ -25,6 +25,33 @@ class Settings(BaseSettings):
     yahoo_auctions_verify_ssl: bool = True
     yahoo_auctions_request_interval_seconds: float = 0.0
 
+    yahoo_flea_market_enabled: bool = True
+    yahoo_flea_market_base_url: str = "https://paypayfleamarket.yahoo.co.jp"
+    yahoo_flea_market_search_path: str = "/search"
+    yahoo_flea_market_keyword: str = "万年筆"
+    yahoo_flea_market_max_results: int = 60
+    yahoo_flea_market_timeout_seconds: int = 20
+    yahoo_flea_market_verify_ssl: bool = True
+    yahoo_flea_market_request_interval_seconds: float = 0.0
+
+    mercari_enabled: bool = True
+    mercari_base_url: str = "https://jp.mercari.com"
+    mercari_search_path: str = "/search"
+    mercari_keyword: str = "万年筆"
+    mercari_max_results: int = 60
+    mercari_timeout_seconds: int = 20
+    mercari_verify_ssl: bool = True
+    mercari_request_interval_seconds: float = 0.0
+
+    rakuma_enabled: bool = True
+    rakuma_base_url: str = "https://fril.jp"
+    rakuma_search_path: str = "/s"
+    rakuma_keyword: str = "万年筆"
+    rakuma_max_results: int = 60
+    rakuma_timeout_seconds: int = 20
+    rakuma_verify_ssl: bool = True
+    rakuma_request_interval_seconds: float = 0.0
+
     fixture_listings_path: str = "data/fixtures/listings_sample.json"
     reports_dir: str = "data/reports"
 

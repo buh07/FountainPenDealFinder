@@ -60,6 +60,7 @@ class CollectRunResponse(BaseModel):
     scored_count: int
     confident_count: int
     potential_count: int
+    source_counts: dict[str, int] = Field(default_factory=dict)
     report_path: str | None = None
 
 
@@ -84,3 +85,28 @@ class AuctionPredictionResponse(BaseModel):
     expected_final_price_jpy: int | None = None
     low_tail_price_jpy: int | None = None
     auction_confidence: float | None = None
+
+
+class ProxyDealOption(BaseModel):
+    listing_id: str
+    marketplace: str
+    listing_title: str
+    proxy_name: str
+    arbitrage_rank: int | None = None
+    total_cost_jpy: int
+    resale_reference_jpy: int
+    expected_profit_jpy: int
+    expected_profit_pct: float
+    coupon_id: str | None = None
+    coupon_discount_jpy: int
+    is_recommended: bool
+
+
+class ProxyDealsForListingResponse(BaseModel):
+    listing_id: str
+    options: list[ProxyDealOption]
+
+
+class ProxyTopDealsResponse(BaseModel):
+    total: int
+    items: list[ProxyDealOption]

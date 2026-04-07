@@ -7,6 +7,7 @@ from .routers.collect import router as collect_router
 from .routers.health import router as health_router
 from .routers.listings import router as listings_router
 from .routers.predict import router as predict_router
+from .routers.proxy import router as proxy_router
 from .routers.reports import router as reports_router
 from .routers.scoring import router as scoring_router
 
@@ -28,6 +29,7 @@ app.include_router(collect_router)
 app.include_router(listings_router)
 app.include_router(scoring_router)
 app.include_router(predict_router)
+app.include_router(proxy_router)
 app.include_router(reports_router)
 
 

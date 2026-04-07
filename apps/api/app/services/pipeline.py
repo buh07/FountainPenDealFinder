@@ -7,16 +7,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..adapters.fixture_source import FixtureListingSourceAdapter
+from ..adapters.mercari import MercariAdapter
+from ..adapters.rakuma import RakumaAdapter
 from ..adapters.yahoo_auctions import YahooAuctionsAdapter
+from ..adapters.yahoo_flea_market import YahooFleaMarketAdapter
 from ..core.config import get_settings
 from ..models import (
     AuctionPrediction,
     ClassificationResult,
     DealScore,
-    ProxyOptionEstimate,
     RawListing,
     ValuationPrediction,
 )
+from .pricing_models import predict_auction_value, predict_resale_value
+from .proxy_tracker import estimate_proxy_deals, upsert_proxy_deals
 
 
 def _to_json(value: Any) -> str:
@@ -58,32 +62,83 @@ def load_marketplace_listings() -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
     day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
     rows: list[dict[str, Any]] = []
+    fixture = FixtureListingSourceAdapter()
 
-    if settings.yahoo_auctions_enabled:
-        yahoo = YahooAuctionsAdapter()
-        try:
-            rows.extend(yahoo.get_fresh_window_listings(day_start, category="fountain_pen"))
-            rows.extend(
-                yahoo.get_ending_auctions(
-                    window_start=now,
-                    window_end=now + timedelta(hours=24),
+    def collect_source(
+        source_name: str,
+        enabled: bool,
+        adapter: Any,
+        has_ending_auctions: bool,
+    ) -> list[dict[str, Any]]:
+        source_rows: list[dict[str, Any]] = []
+
+        if enabled:
+            try:
+                source_rows.extend(adapter.get_fresh_window_listings(day_start, category="fountain_pen"))
+                if has_ending_auctions:
+                    source_rows.extend(
+                        adapter.get_ending_auctions(
+                            window_start=now,
+                            window_end=now + timedelta(hours=24),
+                            category="fountain_pen",
+                        )
+                    )
+            except Exception:
+                # Keep ingestion alive when a source is blocked or parser changes.
+                pass
+
+        if (not source_rows) and settings.use_fixture_fallback:
+            source_rows.extend(
+                fixture.get_fresh_window_listings(
+                    day_start,
                     category="fountain_pen",
+                    source_filter=source_name,
                 )
             )
-        except Exception:
-            # Keep the pipeline alive if Yahoo temporarily blocks or changes layout.
-            pass
+            if has_ending_auctions:
+                source_rows.extend(
+                    fixture.get_ending_auctions(
+                        window_start=now,
+                        window_end=now + timedelta(hours=24),
+                        category="fountain_pen",
+                        source_filter=source_name,
+                    )
+                )
 
-    if (not rows) and settings.use_fixture_fallback:
-        fixture = FixtureListingSourceAdapter()
-        rows.extend(fixture.get_fresh_window_listings(day_start, category="fountain_pen"))
-        rows.extend(
-            fixture.get_ending_auctions(
-                window_start=now,
-                window_end=now + timedelta(hours=24),
-                category="fountain_pen",
-            )
+        return source_rows
+
+    rows.extend(
+        collect_source(
+            source_name="yahoo_auctions",
+            enabled=settings.yahoo_auctions_enabled,
+            adapter=YahooAuctionsAdapter(),
+            has_ending_auctions=True,
         )
+    )
+    rows.extend(
+        collect_source(
+            source_name="yahoo_flea_market",
+            enabled=settings.yahoo_flea_market_enabled,
+            adapter=YahooFleaMarketAdapter(),
+            has_ending_auctions=False,
+        )
+    )
+    rows.extend(
+        collect_source(
+            source_name="mercari",
+            enabled=settings.mercari_enabled,
+            adapter=MercariAdapter(),
+            has_ending_auctions=False,
+        )
+    )
+    rows.extend(
+        collect_source(
+            source_name="rakuma",
+            enabled=settings.rakuma_enabled,
+            adapter=RakumaAdapter(),
+            has_ending_auctions=False,
+        )
+    )
 
     return _dedupe_rows(rows)
 
@@ -295,58 +350,6 @@ def _upsert_classification(
     return row
 
 
-def predict_resale_value(
-    listing: RawListing,
-    classification_payload: dict[str, Any],
-) -> dict[str, Any]:
-    multipliers = {
-        "Pilot": 1.75,
-        "Namiki": 2.0,
-        "Sailor": 1.6,
-        "Platinum": 1.5,
-        "Nakaya": 1.9,
-        "Pelikan": 1.7,
-        "Montblanc": 1.85,
-        "Unknown": 1.3,
-    }
-
-    base_price = listing.price_buy_now_jpy or listing.current_price_jpy or 12000
-    brand = classification_payload["brand"]
-    multiplier = multipliers.get(brand, 1.3)
-
-    resale_pred = int(base_price * multiplier)
-    item_count = classification_payload["item_count_estimate"]
-    if item_count > 1:
-        resale_pred = int(resale_pred * (1 + 0.68 * (item_count - 1)))
-
-    grade_penalty = {
-        "A": 1.0,
-        "B+": 0.95,
-        "B": 0.9,
-        "C": 0.75,
-        "Parts/Repair": 0.45,
-    }
-    resale_pred = int(resale_pred * grade_penalty.get(classification_payload["condition_grade"], 0.85))
-
-    ci_margin = max(2000, int(resale_pred * 0.15))
-    low = max(1000, resale_pred - ci_margin)
-    high = resale_pred + ci_margin
-
-    valuation_confidence = min(
-        0.94,
-        0.45
-        + (0.15 if brand != "Unknown" else 0.0)
-        + (classification_payload["classification_confidence"] * 0.32),
-    )
-
-    return {
-        "resale_pred_jpy": resale_pred,
-        "resale_ci_low_jpy": low,
-        "resale_ci_high_jpy": high,
-        "valuation_confidence": round(valuation_confidence, 3),
-    }
-
-
 def _upsert_valuation(
     session: Session,
     listing_id: str,
@@ -364,29 +367,6 @@ def _upsert_valuation(
     session.add(row)
     session.flush()
     return row
-
-
-def predict_auction_value(
-    listing: RawListing,
-    valuation_payload: dict[str, Any],
-) -> dict[str, Any] | None:
-    if listing.listing_format != "auction":
-        return None
-
-    current_price = max(1, listing.current_price_jpy)
-    bid_count = listing.bid_count or 0
-    expected = int(current_price * (1.08 + min(0.25, bid_count * 0.03)))
-    expected = max(expected, current_price + 500)
-    expected = min(expected, int(valuation_payload["resale_pred_jpy"] * 0.92))
-
-    low_win = max(int(current_price * 1.02), current_price + 200)
-    confidence = min(0.91, 0.55 + min(0.25, bid_count * 0.04))
-
-    return {
-        "auction_low_win_price_jpy": int(low_win),
-        "auction_expected_final_price_jpy": int(expected),
-        "auction_confidence": round(confidence, 3),
-    }
 
 
 def _upsert_auction(
@@ -414,84 +394,6 @@ def _upsert_auction(
     return row
 
 
-def estimate_proxy_options(listing: RawListing, buy_price_jpy: int) -> list[dict[str, Any]]:
-    proxy_rules = [
-        {"name": "Buyee", "service_fee_jpy": 300, "coupon_sources": {"rakuma", "yahoo_flea_market"}},
-        {"name": "FromJapan", "service_fee_jpy": 250, "coupon_sources": {"mercari"}},
-        {"name": "Neokyo", "service_fee_jpy": 275, "coupon_sources": set()},
-    ]
-
-    domestic_shipping = listing.domestic_shipping_jpy or 1200
-    intl_shipping = 1800
-
-    options: list[dict[str, Any]] = []
-    for rule in proxy_rules:
-        coupon_discount = 0
-        coupon_id = None
-
-        if listing.source in rule["coupon_sources"]:
-            coupon_discount = int(rule["service_fee_jpy"] * 0.5)
-            coupon_id = f"{rule['name'].lower()}_servicefee50"
-
-        if buy_price_jpy >= 60000 and rule["name"] == "FromJapan":
-            coupon_discount += 500
-            coupon_id = (coupon_id or "fromjapan_item500")
-
-        total_cost = max(
-            0,
-            buy_price_jpy + domestic_shipping + rule["service_fee_jpy"] + intl_shipping - coupon_discount,
-        )
-
-        options.append(
-            {
-                "proxy_name": rule["name"],
-                "total_cost_jpy": int(total_cost),
-                "coupon_id": coupon_id,
-                "coupon_discount_jpy": int(coupon_discount),
-                "cost_confidence": 0.74 if coupon_discount == 0 else 0.66,
-                "is_recommended": False,
-            }
-        )
-
-    options.sort(key=lambda item: item["total_cost_jpy"])
-    if options:
-        options[0]["is_recommended"] = True
-    return options
-
-
-def _upsert_proxy_options(
-    session: Session,
-    listing_id: str,
-    payloads: list[dict[str, Any]],
-) -> list[ProxyOptionEstimate]:
-    existing_rows = session.scalars(
-        select(ProxyOptionEstimate).where(ProxyOptionEstimate.listing_id == listing_id)
-    ).all()
-    existing_by_name = {row.proxy_name: row for row in existing_rows}
-
-    rows: list[ProxyOptionEstimate] = []
-    incoming_names = {payload["proxy_name"] for payload in payloads}
-    for payload in payloads:
-        row = existing_by_name.get(payload["proxy_name"])
-        if row is None:
-            row = ProxyOptionEstimate(listing_id=listing_id, proxy_name=payload["proxy_name"])
-
-        row.total_cost_jpy = payload["total_cost_jpy"]
-        row.coupon_id = payload["coupon_id"]
-        row.coupon_discount_jpy = payload["coupon_discount_jpy"]
-        row.cost_confidence = payload["cost_confidence"]
-        row.is_recommended = payload["is_recommended"]
-        session.add(row)
-        rows.append(row)
-
-    for row in existing_rows:
-        if row.proxy_name not in incoming_names:
-            session.delete(row)
-
-    session.flush()
-    return rows
-
-
 def compute_score(
     listing: RawListing,
     classification_payload: dict[str, Any],
@@ -502,8 +404,8 @@ def compute_score(
     settings = get_settings()
 
     best_proxy = next((opt for opt in proxy_payloads if opt["is_recommended"]), proxy_payloads[0])
-    expected_profit = valuation_payload["resale_pred_jpy"] - best_proxy["total_cost_jpy"]
-    expected_profit_pct = expected_profit / max(best_proxy["total_cost_jpy"], 1)
+    expected_profit = int(best_proxy["expected_profit_jpy"])
+    expected_profit_pct = float(best_proxy["expected_profit_pct"])
 
     images = _from_json(listing.images_json, [])
     listing_quality_conf = 0.35
@@ -560,7 +462,8 @@ def compute_score(
     rationale = (
         f"{classification_payload['brand']} {classification_payload['line'] or 'fountain pen'} "
         f"estimated resale {valuation_payload['resale_pred_jpy']} JPY, "
-        f"best proxy {best_proxy['proxy_name']} at {best_proxy['total_cost_jpy']} JPY."
+        f"best proxy {best_proxy['proxy_name']} at {best_proxy['total_cost_jpy']} JPY "
+        f"(expected proxy profit {best_proxy['expected_profit_jpy']} JPY)."
     )
 
     return {
@@ -611,8 +514,12 @@ def score_single_listing(session: Session, listing: RawListing) -> dict[str, Any
         if auction_payload
         else (listing.price_buy_now_jpy or listing.current_price_jpy)
     )
-    proxy_payloads = estimate_proxy_options(listing, int(buy_price_for_proxy or 0))
-    proxy_rows = _upsert_proxy_options(session, listing.listing_id, proxy_payloads)
+    proxy_payloads = estimate_proxy_deals(
+        listing,
+        buy_price_jpy=int(buy_price_for_proxy or 0),
+        resale_reference_jpy=int(valuation_payload["resale_pred_jpy"]),
+    )
+    proxy_rows = upsert_proxy_deals(session, listing.listing_id, proxy_payloads)
 
     score_payload = compute_score(
         listing,
@@ -637,10 +544,12 @@ def run_collection_pipeline(session: Session, report_date: date | None = None) -
 
     ingested_count = 0
     scored_count = 0
+    source_counts: dict[str, int] = {}
     for payload in source_rows:
         listing = upsert_raw_listing(session, payload)
         artifacts = score_single_listing(session, listing)
         ingested_count += 1
+        source_counts[listing.source] = source_counts.get(listing.source, 0) + 1
         if artifacts["deal_score"].bucket != "discard":
             scored_count += 1
 
@@ -656,6 +565,7 @@ def run_collection_pipeline(session: Session, report_date: date | None = None) -
         "scored_count": scored_count,
         "confident_count": len(report.confident),
         "potential_count": len(report.potential),
+        "source_counts": source_counts,
         "report_path": report.report_path,
     }
 

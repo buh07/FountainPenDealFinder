@@ -39,6 +39,9 @@ class FixtureListingSourceAdapter:
             return []
         return [item for item in payload if isinstance(item, dict)]
 
+    def by_source(self, source: str) -> list[RawListingPayload]:
+        return [item for item in self._load() if str(item.get("source") or "") == source]
+
     def search(self, query: SearchQuery) -> list[RawListingPayload]:
         keyword = query.keyword.lower().strip()
         matches = []
@@ -71,9 +74,11 @@ class FixtureListingSourceAdapter:
         self,
         window_start: datetime,
         category: str,
+        source_filter: str | None = None,
     ) -> list[RawListingPayload]:
         rows: list[RawListingPayload] = []
-        for item in self._load():
+        payload = self.by_source(source_filter) if source_filter else self._load()
+        for item in payload:
             listed_at = _parse_datetime(item.get("listed_at"))
             if listed_at is None:
                 continue
@@ -86,9 +91,11 @@ class FixtureListingSourceAdapter:
         window_start: datetime,
         window_end: datetime,
         category: str,
+        source_filter: str | None = None,
     ) -> list[RawListingPayload]:
         rows: list[RawListingPayload] = []
-        for item in self._load():
+        payload = self.by_source(source_filter) if source_filter else self._load()
+        for item in payload:
             if item.get("listing_format") != "auction":
                 continue
             ends_at = _parse_datetime(item.get("ends_at"))

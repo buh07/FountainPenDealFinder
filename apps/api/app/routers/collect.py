@@ -25,5 +25,6 @@ def run_collect(
         scored_count=result["scored_count"],
         confident_count=result["confident_count"],
         potential_count=result["potential_count"],
+        source_counts=result.get("source_counts", {}),
         report_path=result.get("report_path"),
     )

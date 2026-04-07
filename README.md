@@ -23,13 +23,23 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 - `POST /score/{listing_id}`
 - `POST /predict/resale/{listing_id}`
 - `POST /predict/auction/{listing_id}`
+- `GET /proxy/listing/{listing_id}`
+- `GET /proxy/top`
 - `GET /reports/daily/{date}`
 
 ## Source Ingestion Status
 
 - Yahoo! JAPAN Auctions: connected via `YahooAuctionsAdapter` in `apps/api/app/adapters/yahoo_auctions.py`
-- Fallback source: fixture data in `data/fixtures/listings_sample.json` when Yahoo data is unavailable
-- Ingestion order: Yahoo Auctions first, fixture fallback second
+- Yahoo! Fleamarket: connected via `YahooFleaMarketAdapter` in `apps/api/app/adapters/yahoo_flea_market.py`
+- Mercari: connected via `MercariAdapter` in `apps/api/app/adapters/mercari.py`
+- Rakuma: connected via `RakumaAdapter` in `apps/api/app/adapters/rakuma.py`
+- Fallback source: fixture data in `data/fixtures/listings_sample.json` is applied per-source when connector collection fails or returns empty.
+
+## Pricing vs Proxy Tracking
+
+- Pricing models are isolated in `apps/api/app/services/pricing_models.py` (resale + auction prediction).
+- Proxy economics and ranking are isolated in `apps/api/app/services/proxy_tracker.py`.
+- Score computation consumes proxy outputs (`expected_profit_jpy`, `expected_profit_pct`) rather than duplicating proxy math inline.
 
 ## Quick Start
 

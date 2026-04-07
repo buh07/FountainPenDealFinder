@@ -46,6 +46,18 @@ curl -X POST http://localhost:8000/collect/run
 curl -X POST 'http://localhost:8000/collect/refresh-ending?window_hours=24'
 ```
 
+1. Check aggregated health metrics and alert signals:
+
+```bash
+curl 'http://localhost:8000/health/metrics?window_hours=24'
+```
+
+1. Dispatch current health alerts to webhook (if configured):
+
+```bash
+curl -X POST 'http://localhost:8000/health/alerts/dispatch?window_hours=24'
+```
+
 1. Start review dashboard:
 
 ```bash
@@ -79,6 +91,8 @@ Scheduler environment knobs:
 - `WORKER_ENDING_AUCTIONS_INTERVAL_SECONDS`
 - `WORKER_IDLE_SLEEP_SECONDS`
 - `WORKER_ENDING_AUCTION_WINDOW_HOURS`
+- `WORKER_DISPATCH_HEALTH_ALERTS`
+- `WORKER_HEALTH_ALERT_WINDOW_HOURS`
 
 ## Training pipeline
 
@@ -124,4 +138,14 @@ This writes to both `manual_review` and `training_example` tables.
 
 - `INGESTION_RETRY_ATTEMPTS`, `INGESTION_RETRY_BACKOFF_SECONDS`, and parse-completeness settings control adapter reliability behavior.
 - `BASELINE_EVAL_MIN_ROWS`, `BASELINE_EVAL_RESALE_MAX_MAPE`, and `BASELINE_EVAL_AUCTION_MAX_MAPE` control retrain quality gates.
+- `MONITORING_MIN_SOURCE_COUNT`, `MONITORING_MIN_PARSE_COMPLETENESS`, `MONITORING_MIN_NON_DISCARD_RATE`, and `MONITORING_MAX_FALSE_POSITIVE_RATE` control `/health/metrics` alert thresholds.
+- `MONITORING_ALERT_WEBHOOK_URL` and `MONITORING_ALERT_WEBHOOK_TIMEOUT_SECONDS` control webhook dispatch behavior for `/health/alerts/dispatch`.
 - If local SSL trust chain is incomplete during development, connector-specific verify flags can be temporarily disabled.
+
+## Test commands
+
+Run parser regression and monitoring coverage:
+
+```bash
+python -m pytest apps/api/tests -q
+```

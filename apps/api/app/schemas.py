@@ -152,3 +152,24 @@ class RetrainJobResponse(BaseModel):
     finished_at: datetime
     status: Literal["ok", "error"]
     details: str
+
+
+class HealthMetricsResponse(BaseModel):
+    generated_at: datetime
+    window_hours: int
+    total_recent_listings: int
+    source_counts: dict[str, int] = Field(default_factory=dict)
+    parse_completeness_avg: float
+    non_discard_rate: float
+    manual_review_count: int
+    false_positive_rate: float | None = None
+    baseline_eval_pass: bool | None = None
+    alerts: list[str] = Field(default_factory=list)
+
+
+class HealthAlertDispatchResponse(BaseModel):
+    sent: bool
+    reason: str
+    alert_count: int
+    destination: str | None = None
+    status_code: int | None = None

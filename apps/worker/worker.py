@@ -4,14 +4,26 @@ from datetime import date, datetime
 
 from apps.api.app.core.config import get_settings
 from apps.api.app.db import SessionLocal, init_db
+from apps.api.app.services.alerting import dispatch_health_alerts
+from apps.api.app.services.monitoring import build_health_metrics
 from apps.api.app.services.pipeline import run_collection_pipeline, run_ending_auction_refresh
 
 
 def run_once(report_date: date | None) -> None:
+    settings = get_settings()
     print(f"[{datetime.utcnow().isoformat()}] worker start")
     init_db()
     with SessionLocal() as db:
         result = run_collection_pipeline(db, report_date)
+        if settings.worker_dispatch_health_alerts:
+            metrics = build_health_metrics(db, window_hours=settings.worker_health_alert_window_hours)
+            dispatch_result = dispatch_health_alerts(metrics)
+            print(
+                "health alert dispatch: "
+                f"sent={dispatch_result.sent} "
+                f"reason={dispatch_result.reason} "
+                f"alert_count={dispatch_result.alert_count}"
+            )
     print(
         "completed run: "
         f"ingested={result['ingested_count']} "
@@ -23,10 +35,20 @@ def run_once(report_date: date | None) -> None:
 
 
 def run_ending_refresh_once(window_hours: int) -> None:
+    settings = get_settings()
     print(f"[{datetime.utcnow().isoformat()}] ending-refresh start")
     init_db()
     with SessionLocal() as db:
         result = run_ending_auction_refresh(db, window_hours=window_hours)
+        if settings.worker_dispatch_health_alerts:
+            metrics = build_health_metrics(db, window_hours=settings.worker_health_alert_window_hours)
+            dispatch_result = dispatch_health_alerts(metrics)
+            print(
+                "health alert dispatch: "
+                f"sent={dispatch_result.sent} "
+                f"reason={dispatch_result.reason} "
+                f"alert_count={dispatch_result.alert_count}"
+            )
     print(
         "completed ending refresh: "
         f"window={result['window_hours']}h "

@@ -69,6 +69,15 @@ class Settings(BaseSettings):
     baseline_eval_resale_max_mape: float = 0.5
     baseline_eval_auction_max_mape: float = 0.4
 
+    monitoring_min_source_count: int = 1
+    monitoring_min_parse_completeness: float = 0.65
+    monitoring_min_non_discard_rate: float = 0.1
+    monitoring_max_false_positive_rate: float = 0.6
+    monitoring_alert_webhook_url: str = ""
+    monitoring_alert_webhook_timeout_seconds: int = 10
+    worker_dispatch_health_alerts: bool = False
+    worker_health_alert_window_hours: int = 24
+
     fixture_listings_path: str = "data/fixtures/listings_sample.json"
     reports_dir: str = "data/reports"
 

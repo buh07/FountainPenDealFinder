@@ -18,6 +18,8 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 ## Current API Endpoints
 
 - `GET /health`
+- `GET /health/metrics`
+- `POST /health/alerts/dispatch`
 - `POST /collect/run`
 - `GET /listings`
 - `GET /listings/{listing_id}`
@@ -72,6 +74,8 @@ Worker cadence defaults are configurable via `.env`:
 - `WORKER_ENDING_AUCTIONS_INTERVAL_SECONDS`
 - `WORKER_IDLE_SLEEP_SECONDS`
 - `WORKER_ENDING_AUCTION_WINDOW_HOURS`
+- `WORKER_DISPATCH_HEALTH_ALERTS`
+- `WORKER_HEALTH_ALERT_WINDOW_HOURS`
 
 ## Quick Start
 
@@ -145,6 +149,30 @@ Gate-related `.env` settings:
 - `BASELINE_EVAL_MIN_ROWS`
 - `BASELINE_EVAL_RESALE_MAX_MAPE`
 - `BASELINE_EVAL_AUCTION_MAX_MAPE`
+
+## Monitoring and Tests
+
+- Health metrics and alert signals:
+
+```bash
+curl 'http://localhost:8000/health/metrics?window_hours=24'
+```
+
+- Dispatch current health alerts to configured webhook destination:
+
+```bash
+curl -X POST 'http://localhost:8000/health/alerts/dispatch?window_hours=24'
+```
+
+- Alert/webhook settings:
+- `MONITORING_ALERT_WEBHOOK_URL`
+- `MONITORING_ALERT_WEBHOOK_TIMEOUT_SECONDS`
+
+- Parser regression and monitoring tests:
+
+```bash
+python -m pytest apps/api/tests -q
+```
 
 ## Migration Commands
 

@@ -47,6 +47,7 @@ Feedback, snapshots, and policy tables:
 Implemented routes include:
 
 - Collection runs and ending-auction refresh
+- Health checks and rolling-window health metrics
 - Listing rank and listing detail
 - Prediction and scoring
 - Proxy deal views
@@ -54,10 +55,18 @@ Implemented routes include:
 - Manual review ingestion
 - Baseline retrain job trigger
 
+### Monitoring layer
+
+- `apps/api/app/services/monitoring.py` computes rolling-window health metrics from persisted listings, scores, and manual review outcomes.
+- `GET /health/metrics` emits source volume, parse completeness, non-discard rate, false-positive rate, baseline-eval gate state, and alert keys.
+- `POST /health/alerts/dispatch` posts current alert payloads to a configured webhook through `apps/api/app/services/alerting.py`.
+- Alert thresholds are env-configurable through `MONITORING_*` settings.
+
 ### Worker and scheduling
 
 - One-shot full run and one-shot ending-refresh modes.
 - Recurring daemon mode with separate cadence for full-source runs and ending-auction refresh runs.
+- Optional worker-side alert dispatch can be enabled to emit monitoring alerts after each run.
 
 ### MCP-facing services
 
@@ -72,7 +81,7 @@ Implemented routes include:
 
 ## Next architectural steps
 
-1. Add parser regression tests and source health monitoring.
-2. Add train/eval gating and artifact promotion workflow.
+1. Add alert dedupe/rate-limiting and persistent alert-event history.
+2. Add artifact promotion/versioning workflow after eval gate pass.
 3. Move MCP wrappers to full MCP SDK tool registration.
 4. Add review analytics and calibration feedback loop.

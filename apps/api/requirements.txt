@@ -8,3 +8,4 @@ psycopg[binary]==3.2.9
 alembic==1.16.4
 httpx==0.28.1
 beautifulsoup4==4.13.4
+pytest==8.3.5

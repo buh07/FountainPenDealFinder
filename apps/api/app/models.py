@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -208,6 +209,7 @@ class ListingSnapshot(Base):
     __tablename__ = "listing_snapshot"
     __table_args__ = (
         UniqueConstraint("listing_id", "snapshot_hash", name="uq_listing_snapshot_hash"),
+        Index("ix_listing_snapshot_listing_captured", "listing_id", "captured_at"),
     )
 
     snapshot_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -242,8 +244,31 @@ class ListingImage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class ListingAsset(Base):
+    __tablename__ = "listing_asset"
+    __table_args__ = (
+        UniqueConstraint("listing_id", "asset_type", "content_hash", name="uq_listing_asset_hash"),
+    )
+
+    asset_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    listing_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("raw_listing.listing_id", ondelete="CASCADE"),
+        index=True,
+    )
+    asset_type: Mapped[str] = mapped_column(String(32), index=True)
+    local_path: Mapped[str] = mapped_column(String(2048))
+    source_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
+
+
 class DealScore(Base):
     __tablename__ = "deal_score"
+    __table_args__ = (
+        Index("ix_deal_score_updated_at", "updated_at"),
+        Index("ix_deal_score_bucket_updated_at", "bucket", "updated_at"),
+    )
 
     listing_id: Mapped[str] = mapped_column(
         String(36),
@@ -310,7 +335,7 @@ class ManualReview(Base):
     was_purchased: Mapped[bool] = mapped_column(Boolean, default=False)
     notes: Mapped[str] = mapped_column(Text, default="")
     reviewer: Mapped[str] = mapped_column(String(64), default="self")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class TrainingExample(Base):
@@ -333,3 +358,21 @@ class TrainingExample(Base):
     feature_json: Mapped[str] = mapped_column(Text, default="{}")
     split: Mapped[str] = mapped_column(String(16), default="train")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class HealthAlertEvent(Base):
+    __tablename__ = "health_alert_event"
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    window_hours: Mapped[int] = mapped_column(Integer, default=24)
+    alert_signature: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    alert_keys_json: Mapped[str] = mapped_column(Text, default="[]")
+    alert_count: Mapped[int] = mapped_column(Integer, default=0)
+    sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    reason: Mapped[str] = mapped_column(String(64), index=True)
+    destination: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deduped: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    cooldown_remaining_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)

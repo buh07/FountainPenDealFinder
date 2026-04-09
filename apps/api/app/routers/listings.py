@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..schemas import ListListingsResponse, ListingSummary
-from ..services.reporting import get_listing_summary, list_ranked_listings
+from ..services.reporting import count_ranked_listings, get_listing_summary, list_ranked_listings
 
 router = APIRouter(prefix="/listings", tags=["listings"])
 
@@ -13,10 +13,12 @@ def get_listings(
     source: str | None = Query(default=None),
     bucket: str | None = Query(default=None, pattern="^(confident|potential|discard)?$"),
     limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=100000),
     db: Session = Depends(get_db),
 ) -> ListListingsResponse:
-    items = list_ranked_listings(db, source=source, bucket=bucket, limit=limit)
-    return ListListingsResponse(total=len(items), items=items)
+    total = count_ranked_listings(db, source=source, bucket=bucket)
+    items = list_ranked_listings(db, source=source, bucket=bucket, limit=limit, offset=offset)
+    return ListListingsResponse(total=total, items=items)
 
 
 @router.get("/{listing_id}", response_model=ListingSummary)

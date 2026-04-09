@@ -1,9 +1,14 @@
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..core.config import get_settings
 from ..models import CouponRule, ProxyOptionEstimate, ProxyPricingPolicy, RawListing
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_PROXY_POLICIES = [
@@ -165,37 +170,89 @@ def _pick_coupon_set(
     buy_price_jpy: int,
     service_fee_jpy: int,
 ) -> tuple[int, str | None]:
-    non_stackable: list[tuple[int, str]] = []
-    stackable_total = 0
-    stackable_ids: list[str] = []
-
+    # Exact optimizer under current rule semantics:
+    # - choose any subset of stackable coupons
+    # - choose at most one non-stackable coupon
+    # Tie-break for deterministic output:
+    # 1) higher total discount, 2) fewer coupons, 3) lexical coupon id order.
+    normalized: dict[tuple[str, bool], int] = {}
     for rule in rules:
         if buy_price_jpy < int(rule.min_buy_price_jpy or 0):
             continue
         discount = _apply_coupon_discount(rule, buy_price_jpy, service_fee_jpy)
         if discount <= 0:
             continue
+        key = (rule.coupon_id, bool(rule.is_stackable))
+        existing = normalized.get(key, 0)
+        if discount > existing:
+            normalized[key] = discount
 
-        if rule.is_stackable:
-            stackable_total += discount
-            stackable_ids.append(rule.coupon_id)
-        else:
-            non_stackable.append((discount, rule.coupon_id))
+    stackable = sorted(
+        [(coupon_id, discount) for (coupon_id, is_stackable), discount in normalized.items() if is_stackable],
+        key=lambda item: item[0],
+    )
+    non_stackable = sorted(
+        [(coupon_id, discount) for (coupon_id, is_stackable), discount in normalized.items() if not is_stackable],
+        key=lambda item: item[0],
+    )
 
-    best_non_stackable = (0, None)
-    if non_stackable:
-        best_non_stackable = max(non_stackable, key=lambda pair: pair[0])
+    best_discount = 0
+    best_coupon_ids: list[str] = []
 
-    total_discount = stackable_total + best_non_stackable[0]
-    coupon_ids = list(stackable_ids)
-    if best_non_stackable[1]:
-        coupon_ids.append(best_non_stackable[1])
+    settings = get_settings()
+    max_exact_stackable = max(1, int(settings.proxy_coupon_max_exact_stackable))
+    fallback_top_stackable = max(1, int(settings.proxy_coupon_fallback_top_stackable))
 
-    if not coupon_ids:
-        return total_discount, None
+    if len(stackable) > max_exact_stackable:
+        ranked = sorted(stackable, key=lambda item: (-int(item[1]), item[0]))
+        keep_count = min(len(ranked), max_exact_stackable, fallback_top_stackable)
+        stackable = sorted(ranked[:keep_count], key=lambda item: item[0])
+        logger.warning(
+            "Coupon optimizer stackable set exceeded exact cap; using reduced candidate set",
+            extra={
+                "stackable_total": len(ranked),
+                "stackable_kept": keep_count,
+            },
+        )
 
-    coupon_ids = sorted(set(coupon_ids))
-    return total_discount, "+".join(coupon_ids)
+    stack_count = len(stackable)
+    for mask in range(1 << stack_count):
+        chosen_stackable_ids: list[str] = []
+        stackable_discount = 0
+        for idx in range(stack_count):
+            if mask & (1 << idx):
+                coupon_id, discount = stackable[idx]
+                chosen_stackable_ids.append(coupon_id)
+                stackable_discount += int(discount)
+
+        non_stackable_choices: list[tuple[str | None, int]] = [(None, 0)]
+        non_stackable_choices.extend([(coupon_id, int(discount)) for coupon_id, discount in non_stackable])
+
+        for non_stackable_id, non_stackable_discount in non_stackable_choices:
+            selected_ids = list(chosen_stackable_ids)
+            if non_stackable_id:
+                if non_stackable_id in selected_ids:
+                    continue
+                selected_ids.append(non_stackable_id)
+            selected_ids = sorted(set(selected_ids))
+
+            total_discount = stackable_discount + non_stackable_discount
+            is_better = False
+            if total_discount > best_discount:
+                is_better = True
+            elif total_discount == best_discount:
+                if len(selected_ids) < len(best_coupon_ids):
+                    is_better = True
+                elif len(selected_ids) == len(best_coupon_ids) and tuple(selected_ids) < tuple(best_coupon_ids):
+                    is_better = True
+
+            if is_better:
+                best_discount = int(total_discount)
+                best_coupon_ids = selected_ids
+
+    if not best_coupon_ids:
+        return int(best_discount), None
+    return int(best_discount), "+".join(best_coupon_ids)
 
 
 def estimate_proxy_deals(

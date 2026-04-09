@@ -1,29 +1,12 @@
-import readline from "node:readline";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
 
 const API_BASE = process.env.MCP_API_BASE || "http://localhost:8000";
 
-const TOOL_DEFS = [
-	{
-		name: "predict_resale",
-		description: "Run resale prediction for listing_id",
-		inputSchema: { listing_id: "required listing id" },
-	},
-	{
-		name: "predict_auction",
-		description: "Run auction prediction for listing_id",
-		inputSchema: { listing_id: "required listing id" },
-	},
-	{
-		name: "score_listing",
-		description: "Rescore one listing and return listing summary",
-		inputSchema: { listing_id: "required listing id" },
-	},
-	{
-		name: "run_retrain_job",
-		description: "Run baseline retrain pipeline",
-		inputSchema: {},
-	},
-];
+function asErrorEnvelope(code, message, details = null) {
+	return JSON.stringify({ ok: false, code, message, details });
+}
 
 async function apiPost(path, body) {
 	const response = await fetch(`${API_BASE}${path}`, {
@@ -38,59 +21,86 @@ async function apiPost(path, body) {
 	return response.json();
 }
 
-async function runTool(tool, args) {
-	if (tool === "tools") {
-		return TOOL_DEFS;
-	}
-
-	if (tool === "predict_resale") {
-		if (!args?.listing_id) throw new Error("listing_id is required");
-		return apiPost(`/predict/resale/${encodeURIComponent(String(args.listing_id))}`);
-	}
-
-	if (tool === "predict_auction") {
-		if (!args?.listing_id) throw new Error("listing_id is required");
-		return apiPost(`/predict/auction/${encodeURIComponent(String(args.listing_id))}`);
-	}
-
-	if (tool === "score_listing") {
-		if (!args?.listing_id) throw new Error("listing_id is required");
-		return apiPost(`/score/${encodeURIComponent(String(args.listing_id))}`);
-	}
-
-	if (tool === "run_retrain_job") {
-		return apiPost(`/retrain/jobs`);
-	}
-
-	throw new Error(`unknown tool: ${tool}`);
+function okContent(payload) {
+	return {
+		content: [{ type: "text", text: JSON.stringify(payload) }],
+	};
 }
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+function errorContent(error, code) {
+	const message = error instanceof Error ? error.message : String(error);
+	return {
+		isError: true,
+		content: [{ type: "text", text: asErrorEnvelope(code, message) }],
+	};
+}
 
-console.log(JSON.stringify({ event: "ready", service: "mcp-pricing", tools: TOOL_DEFS.map((t) => t.name) }));
-
-rl.on("line", async (line) => {
-	const raw = line.trim();
-	if (!raw) return;
-
-	let message;
-	try {
-		message = JSON.parse(raw);
-	} catch {
-		console.log(JSON.stringify({ ok: false, error: "invalid_json" }));
-		return;
-	}
-
-	try {
-		const result = await runTool(message.tool, message.args || {});
-		console.log(JSON.stringify({ id: message.id || null, ok: true, result }));
-	} catch (error) {
-		console.log(
-			JSON.stringify({
-				id: message.id || null,
-				ok: false,
-				error: String(error instanceof Error ? error.message : error),
-			})
-		);
-	}
+const server = new McpServer({
+	name: "mcp-pricing",
+	version: "0.2.0",
 });
+
+server.tool(
+	"predict_resale",
+	"Run resale prediction for listing_id",
+	{
+		listing_id: z.string().min(1),
+	},
+	async ({ listing_id }) => {
+		try {
+			const result = await apiPost(`/predict/resale/${encodeURIComponent(listing_id)}`);
+			return okContent(result);
+		} catch (error) {
+			return errorContent(error, "predict_resale_failed");
+		}
+	}
+);
+
+server.tool(
+	"predict_auction",
+	"Run auction prediction for listing_id",
+	{
+		listing_id: z.string().min(1),
+	},
+	async ({ listing_id }) => {
+		try {
+			const result = await apiPost(`/predict/auction/${encodeURIComponent(listing_id)}`);
+			return okContent(result);
+		} catch (error) {
+			return errorContent(error, "predict_auction_failed");
+		}
+	}
+);
+
+server.tool(
+	"score_listing",
+	"Rescore one listing and return listing summary",
+	{
+		listing_id: z.string().min(1),
+	},
+	async ({ listing_id }) => {
+		try {
+			const result = await apiPost(`/score/${encodeURIComponent(listing_id)}`);
+			return okContent(result);
+		} catch (error) {
+			return errorContent(error, "score_listing_failed");
+		}
+	}
+);
+
+server.tool(
+	"run_retrain_job",
+	"Run baseline retrain pipeline",
+	{},
+	async () => {
+		try {
+			const result = await apiPost(`/retrain/jobs`);
+			return okContent(result);
+		} catch (error) {
+			return errorContent(error, "run_retrain_job_failed");
+		}
+	}
+);
+
+const transport = new StdioServerTransport();
+await server.connect(transport);

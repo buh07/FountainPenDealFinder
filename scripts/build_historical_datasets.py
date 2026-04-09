@@ -5,12 +5,20 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = REPO_ROOT / "data" / "labeled" / "raw"
 OUT_DIR = REPO_ROOT / "data" / "labeled"
+API_ROOT = REPO_ROOT / "apps" / "api"
+
+if str(API_ROOT) not in sys.path:
+    sys.path.insert(0, str(API_ROOT))
+
+from app.services.taxonomy import canonicalize_condition_grade, resolve_taxonomy  # noqa: E402
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -32,14 +40,28 @@ def _load_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def _feedback_pricing_path() -> Path:
+    value = os.environ.get(
+        "FEEDBACK_PRICING_LABELS_PATH",
+        "data/labeled/raw/pen_swap_sales_feedback.jsonl",
+    )
+    path = Path(value)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path
+
+
 def build_pen_swap_dataset() -> int:
     raw_path = RAW_DIR / "pen_swap_sales.jsonl"
+    feedback_path = _feedback_pricing_path()
     out_path = OUT_DIR / "pen_swap_sales.csv"
-    rows = _load_jsonl(raw_path)
+    rows = _load_jsonl(raw_path) + _load_jsonl(feedback_path)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "source",
+        "category",
+        "classification_id",
         "brand",
         "line",
         "condition_grade",
@@ -53,12 +75,21 @@ def build_pen_swap_dataset() -> int:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
+            taxonomy = resolve_taxonomy(
+                brand=row.get("brand"),
+                line=row.get("line"),
+                classification_id=row.get("classification_id"),
+                text=row.get("title"),
+            )
+            condition_grade = canonicalize_condition_grade(row.get("condition_grade"))
             writer.writerow(
                 {
                     "source": row.get("source", "r_pen_swap"),
-                    "brand": row.get("brand", "Unknown"),
-                    "line": row.get("line", "unknown"),
-                    "condition_grade": row.get("condition_grade", "B"),
+                    "category": taxonomy["category"] or "other",
+                    "classification_id": taxonomy["classification_id"] or "unknown_fountain_pen",
+                    "brand": taxonomy["brand"] or "Unknown",
+                    "line": taxonomy["line"] or "fountain_pen",
+                    "condition_grade": condition_grade,
                     "ask_price_jpy": int(row.get("ask_price_jpy") or 0),
                     "sold_price_jpy": int(row.get("sold_price_jpy") or 0),
                     "item_count": int(row.get("item_count") or 1),
@@ -77,6 +108,8 @@ def build_yahoo_outcome_dataset() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "source",
+        "category",
+        "classification_id",
         "brand",
         "line",
         "current_price_jpy",
@@ -90,11 +123,19 @@ def build_yahoo_outcome_dataset() -> int:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
+            taxonomy = resolve_taxonomy(
+                brand=row.get("brand"),
+                line=row.get("line"),
+                classification_id=row.get("classification_id"),
+                text=row.get("title"),
+            )
             writer.writerow(
                 {
                     "source": row.get("source", "yahoo_auctions"),
-                    "brand": row.get("brand", "Unknown"),
-                    "line": row.get("line", "unknown"),
+                    "category": taxonomy["category"] or "other",
+                    "classification_id": taxonomy["classification_id"] or "unknown_fountain_pen",
+                    "brand": taxonomy["brand"] or "Unknown",
+                    "line": taxonomy["line"] or "fountain_pen",
                     "current_price_jpy": int(row.get("current_price_jpy") or 0),
                     "bid_count": int(row.get("bid_count") or 0),
                     "hours_to_end": int(row.get("hours_to_end") or 0),

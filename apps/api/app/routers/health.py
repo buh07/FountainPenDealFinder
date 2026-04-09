@@ -28,4 +28,4 @@ def dispatch_health_metrics_alerts(
     db: Session = Depends(get_db),
 ) -> HealthAlertDispatchResponse:
     metrics = build_health_metrics(db, window_hours=window_hours)
-    return dispatch_health_alerts(metrics)
+    return dispatch_health_alerts(db, metrics)

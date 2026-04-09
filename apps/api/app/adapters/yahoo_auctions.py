@@ -4,11 +4,13 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
 
 from .base import RawListingPayload, SearchQuery
+from .html_helpers import parse_price_with_status
 from ..core.config import get_settings
 
 
@@ -21,13 +23,8 @@ def _to_utc_iso(value: datetime | None) -> str | None:
 
 
 def _extract_price_jpy(text: str) -> int | None:
-    matches = re.findall(r"([0-9][0-9,]{2,})\s*円", text)
-    if not matches:
-        return None
-    try:
-        return int(matches[0].replace(",", ""))
-    except ValueError:
-        return None
+    price, _ = parse_price_with_status(text)
+    return price
 
 
 def _extract_auction_id(url: str) -> str | None:
@@ -42,11 +39,12 @@ def _parse_datetime_maybe(value: str | None) -> datetime | None:
         return None
 
     normalized = value.strip().replace("Z", "+00:00")
+    jst = ZoneInfo("Asia/Tokyo")
     try:
         parsed = datetime.fromisoformat(normalized)
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed
+            parsed = parsed.replace(tzinfo=jst)
+        return parsed.astimezone(timezone.utc)
     except ValueError:
         pass
 
@@ -60,7 +58,7 @@ def _parse_datetime_maybe(value: str | None) -> datetime | None:
         day = int(jp_match.group(3))
         hour = int(jp_match.group(4))
         minute = int(jp_match.group(5) or 0)
-        return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+        return datetime(year, month, day, hour, minute, tzinfo=jst).astimezone(timezone.utc)
 
     return None
 
@@ -98,6 +96,48 @@ class YahooAuctionsAdapter:
                 time.sleep(self.request_interval_seconds)
             return response.text
 
+    @staticmethod
+    def _mark_price_parse_error(raw_attributes: dict[str, Any], parse_error: bool) -> dict[str, Any]:
+        updated = dict(raw_attributes)
+        if parse_error:
+            updated["price_parse_error"] = True
+        else:
+            updated.pop("price_parse_error", None)
+        return updated
+
+    def _repair_price_with_detail(self, row: RawListingPayload) -> RawListingPayload:
+        raw_attributes = row.get("raw_attributes")
+        if not isinstance(raw_attributes, dict):
+            raw_attributes = {}
+        if not raw_attributes.get("price_parse_error"):
+            return row
+
+        source_listing_id = str(row.get("source_listing_id") or "")
+        if not source_listing_id:
+            return row
+
+        try:
+            detail = self.fetch_listing_detail(source_listing_id)
+        except Exception:
+            return row
+        if not detail:
+            return row
+
+        detail_price = int(detail.get("price_buy_now_jpy") or detail.get("current_price_jpy") or 0)
+        if detail_price <= 0:
+            return row
+
+        repaired = dict(row)
+        repaired["current_price_jpy"] = detail_price
+        if repaired.get("listing_format") == "buy_now":
+            repaired["price_buy_now_jpy"] = detail_price
+
+        repaired_attributes = dict(raw_attributes)
+        repaired_attributes["price_repaired_from_detail"] = True
+        repaired_attributes.pop("price_parse_error", None)
+        repaired["raw_attributes"] = repaired_attributes
+        return repaired
+
     def _parse_ldjson_itemlist(self, soup: BeautifulSoup) -> list[RawListingPayload]:
         now_iso = _to_utc_iso(datetime.now(timezone.utc))
         parsed: list[RawListingPayload] = []
@@ -133,15 +173,30 @@ class YahooAuctionsAdapter:
                         continue
 
                     offers = item.get("offers") or {}
-                    price = 0
+                    price: int | None = None
+                    price_parse_error = False
                     if isinstance(offers, dict):
-                        try:
-                            price = int(float(str(offers.get("price") or 0)))
-                        except ValueError:
-                            price = 0
+                        if "price" in offers and offers.get("price") not in (None, ""):
+                            try:
+                                price = int(float(str(offers.get("price"))))
+                            except ValueError:
+                                price_parse_error = True
+                    elif offers not in (None, ""):
+                        price_parse_error = True
+
+                    if price is None:
+                        alt_price, alt_parse_error = parse_price_with_status(
+                            f"{item.get('name') or ''} {item.get('description') or ''}"
+                        )
+                        if alt_price is not None:
+                            price = alt_price
+                        price_parse_error = price_parse_error or alt_parse_error
 
                     ends_at_dt = _parse_datetime_maybe(
                         item.get("endDate") if isinstance(item.get("endDate"), str) else None
+                    )
+                    listed_at_dt = _parse_datetime_maybe(
+                        item.get("startDate") if isinstance(item.get("startDate"), str) else None
                     )
 
                     image_value = item.get("image")
@@ -163,16 +218,19 @@ class YahooAuctionsAdapter:
                             "seller_id": None,
                             "seller_rating": None,
                             "listing_format": "auction",
-                            "current_price_jpy": price,
+                            "current_price_jpy": int(price or 0),
                             "price_buy_now_jpy": None,
                             "domestic_shipping_jpy": 0,
                             "bid_count": None,
-                            "listed_at": now_iso,
+                            "listed_at": _to_utc_iso(listed_at_dt) or now_iso,
                             "ends_at": _to_utc_iso(ends_at_dt),
                             "location_prefecture": None,
                             "condition_text": None,
                             "lot_size_hint": 1,
-                            "raw_attributes": {"connector": "yahoo_auctions_ldjson"},
+                            "raw_attributes": self._mark_price_parse_error(
+                                {"connector": "yahoo_auctions_ldjson"},
+                                parse_error=price_parse_error and (not price or price <= 0),
+                            ),
                         }
                     )
 
@@ -202,7 +260,12 @@ class YahooAuctionsAdapter:
             if anchor.parent is not None:
                 container_text = " ".join(anchor.parent.get_text(" ", strip=True).split())
 
-            price = _extract_price_jpy(container_text) or 0
+            price, parse_error = parse_price_with_status(container_text)
+            if price is None:
+                alt_price, alt_parse_error = parse_price_with_status(title)
+                if alt_price is not None:
+                    price = alt_price
+                parse_error = parse_error or alt_parse_error
             ends_at = _parse_datetime_maybe(container_text)
 
             parsed.append(
@@ -216,7 +279,7 @@ class YahooAuctionsAdapter:
                     "seller_id": None,
                     "seller_rating": None,
                     "listing_format": "auction",
-                    "current_price_jpy": price,
+                    "current_price_jpy": int(price or 0),
                     "price_buy_now_jpy": None,
                     "domestic_shipping_jpy": 0,
                     "bid_count": None,
@@ -225,7 +288,10 @@ class YahooAuctionsAdapter:
                     "location_prefecture": None,
                     "condition_text": None,
                     "lot_size_hint": 1,
-                    "raw_attributes": {"connector": "yahoo_auctions_anchor"},
+                    "raw_attributes": self._mark_price_parse_error(
+                        {"connector": "yahoo_auctions_anchor"},
+                        parse_error=parse_error and (not price or price <= 0),
+                    ),
                 }
             )
 
@@ -248,7 +314,8 @@ class YahooAuctionsAdapter:
             if source_listing_id:
                 deduped[source_listing_id] = row
 
-        return list(deduped.values())[: self.max_results]
+        rows = list(deduped.values())[: self.max_results]
+        return [self._repair_price_with_detail(row) for row in rows]
 
     def search(self, query: SearchQuery) -> list[RawListingPayload]:
         keyword = query.keyword.strip() or self.default_keyword
@@ -288,7 +355,12 @@ class YahooAuctionsAdapter:
                 seen.add(image)
 
         body_text = soup.get_text(" ", strip=True)
-        price = _extract_price_jpy(body_text) or 0
+        price, parse_error = parse_price_with_status(body_text)
+        if price is None:
+            alt_price, alt_parse_error = parse_price_with_status(f"{title} {description_raw}")
+            if alt_price is not None:
+                price = alt_price
+            parse_error = parse_error or alt_parse_error
         ends_at = _parse_datetime_maybe(body_text)
 
         return {
@@ -301,7 +373,7 @@ class YahooAuctionsAdapter:
             "seller_id": None,
             "seller_rating": None,
             "listing_format": "auction",
-            "current_price_jpy": price,
+            "current_price_jpy": int(price or 0),
             "price_buy_now_jpy": None,
             "domestic_shipping_jpy": 0,
             "bid_count": None,
@@ -310,7 +382,10 @@ class YahooAuctionsAdapter:
             "location_prefecture": None,
             "condition_text": None,
             "lot_size_hint": 1,
-            "raw_attributes": {"connector": "yahoo_auctions_detail"},
+            "raw_attributes": self._mark_price_parse_error(
+                {"connector": "yahoo_auctions_detail"},
+                parse_error=parse_error and (not price or price <= 0),
+            ),
         }
 
     def fetch_listing_images(self, source_id: str) -> list[str]:
@@ -344,10 +419,7 @@ class YahooAuctionsAdapter:
         for row in rows:
             ends_at = _parse_datetime_maybe(str(row.get("ends_at") or ""))
             if ends_at is None:
-                # Keep rows with unknown end times for downstream scoring while
-                # still prioritizing known ending auctions when available.
-                ending.append(row)
                 continue
-            if window_start <= ends_at <= window_end:
+            if window_start <= ends_at < window_end:
                 ending.append(row)
         return ending

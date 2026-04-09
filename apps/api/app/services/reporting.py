@@ -1,9 +1,9 @@
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
@@ -18,6 +18,7 @@ from ..models import (
     ValuationPrediction,
 )
 from ..schemas import DailyReportResponse, ListingItem, ListingSummary
+from .listing_quality import derive_price_status, get_default_timezone, local_day_bounds_utc, to_utc
 
 
 def _repo_root() -> Path:
@@ -38,9 +39,9 @@ def _time_remaining(ends_at: datetime | None) -> str | None:
         return None
 
     now = datetime.now(timezone.utc)
-    target = ends_at
-    if target.tzinfo is None:
-        target = target.replace(tzinfo=timezone.utc)
+    target = to_utc(ends_at)
+    if target is None:
+        return None
 
     delta = target - now
     if delta.total_seconds() <= 0:
@@ -52,26 +53,14 @@ def _time_remaining(ends_at: datetime | None) -> str | None:
     return f"{hours}h {minutes}m"
 
 
-def get_listing_summary(session: Session, listing_id: str) -> ListingSummary | None:
-    listing = session.scalar(select(RawListing).where(RawListing.listing_id == listing_id))
-    if listing is None:
-        return None
-
-    classification = session.scalar(
-        select(ClassificationResult).where(ClassificationResult.listing_id == listing_id)
-    )
-    valuation = session.scalar(
-        select(ValuationPrediction).where(ValuationPrediction.listing_id == listing_id)
-    )
-    auction = session.scalar(select(AuctionPrediction).where(AuctionPrediction.listing_id == listing_id))
-    deal = session.scalar(select(DealScore).where(DealScore.listing_id == listing_id))
-    proxy = session.scalar(
-        select(ProxyOptionEstimate).where(
-            ProxyOptionEstimate.listing_id == listing_id,
-            ProxyOptionEstimate.is_recommended.is_(True),
-        )
-    )
-
+def _listing_summary_from_related(
+    listing: RawListing,
+    classification: ClassificationResult | None,
+    valuation: ValuationPrediction | None,
+    auction: AuctionPrediction | None,
+    deal: DealScore | None,
+    proxy: ProxyOptionEstimate | None,
+) -> ListingSummary:
     condition_flags = _from_json(
         classification.condition_flags_json if classification else None,
         [],
@@ -84,9 +73,19 @@ def get_listing_summary(session: Session, listing_id: str) -> ListingSummary | N
     items_raw = _from_json(classification.items_json if classification else None, [])
     items = [ListingItem(**item) for item in items_raw if isinstance(item, dict)]
 
+    risk_flags = _from_json(deal.risk_flags_json if deal else None, [])
+    if not isinstance(risk_flags, list):
+        risk_flags = []
+
     default_total_cost = (
         (listing.price_buy_now_jpy or listing.current_price_jpy)
         + (listing.domestic_shipping_jpy or 0)
+    )
+
+    price_status = derive_price_status(
+        listing.current_price_jpy,
+        listing.price_buy_now_jpy,
+        listing.raw_attributes_json,
     )
 
     return ListingSummary(
@@ -102,6 +101,7 @@ def get_listing_summary(session: Session, listing_id: str) -> ListingSummary | N
         listing_url=listing.url,
         seller_id=listing.seller_id,
         listing_type="auction" if listing.listing_format == "auction" else "buy_now",
+        price_status=price_status,
         current_price_jpy=listing.current_price_jpy,
         estimated_total_buy_cost_jpy=proxy.total_cost_jpy if proxy else default_total_cost,
         estimated_resale_price_jpy=(valuation.resale_pred_jpy if valuation else 0),
@@ -116,10 +116,95 @@ def get_listing_summary(session: Session, listing_id: str) -> ListingSummary | N
         ),
         recommended_proxy=(proxy.proxy_name if proxy else "None"),
         deal_bucket=(deal.bucket if deal else "discard"),
+        risk_flags=[str(flag) for flag in risk_flags],
         listed_at=listing.listed_at,
         time_remaining=_time_remaining(listing.ends_at),
         rationale=(deal.rationale if deal else "Not scored yet."),
     )
+
+
+def _build_listing_summaries(
+    session: Session,
+    listings: list[RawListing],
+) -> list[ListingSummary]:
+    if not listings:
+        return []
+
+    listing_ids = [listing.listing_id for listing in listings]
+    classification_rows = session.scalars(
+        select(ClassificationResult).where(ClassificationResult.listing_id.in_(listing_ids))
+    ).all()
+    valuation_rows = session.scalars(
+        select(ValuationPrediction).where(ValuationPrediction.listing_id.in_(listing_ids))
+    ).all()
+    auction_rows = session.scalars(
+        select(AuctionPrediction).where(AuctionPrediction.listing_id.in_(listing_ids))
+    ).all()
+    deal_rows = session.scalars(
+        select(DealScore).where(DealScore.listing_id.in_(listing_ids))
+    ).all()
+    proxy_rows = session.scalars(
+        select(ProxyOptionEstimate).where(
+            ProxyOptionEstimate.listing_id.in_(listing_ids),
+            ProxyOptionEstimate.is_recommended.is_(True),
+        )
+    ).all()
+
+    classifications = {row.listing_id: row for row in classification_rows}
+    valuations = {row.listing_id: row for row in valuation_rows}
+    auctions = {row.listing_id: row for row in auction_rows}
+    deals = {row.listing_id: row for row in deal_rows}
+    proxies = {row.listing_id: row for row in proxy_rows}
+
+    return [
+        _listing_summary_from_related(
+            listing,
+            classification=classifications.get(listing.listing_id),
+            valuation=valuations.get(listing.listing_id),
+            auction=auctions.get(listing.listing_id),
+            deal=deals.get(listing.listing_id),
+            proxy=proxies.get(listing.listing_id),
+        )
+        for listing in listings
+    ]
+
+
+def _summary_map_for_listing_ids(session: Session, listing_ids: list[str]) -> dict[str, ListingSummary]:
+    if not listing_ids:
+        return {}
+
+    listings = session.scalars(select(RawListing).where(RawListing.listing_id.in_(listing_ids))).all()
+    summaries = _build_listing_summaries(session, listings)
+    return {summary.listing_id: summary for summary in summaries}
+
+
+def get_listing_summary(session: Session, listing_id: str) -> ListingSummary | None:
+    listing = session.scalar(select(RawListing).where(RawListing.listing_id == listing_id))
+    if listing is None:
+        return None
+    return _build_listing_summaries(session, [listing])[0]
+
+
+def _is_in_report_window(
+    listing: RawListing,
+    report_date: date,
+    generated_at: datetime,
+) -> bool:
+    settings = get_settings()
+    default_tz = get_default_timezone(settings.default_timezone)
+
+    if listing.listing_format == "auction":
+        ends_at = to_utc(listing.ends_at)
+        if ends_at is None:
+            return False
+        return generated_at <= ends_at < (generated_at + timedelta(hours=24))
+
+    listed_at = to_utc(listing.listed_at)
+    if listed_at is None:
+        return False
+
+    day_start_utc, day_end_utc = local_day_bounds_utc(report_date, default_tz)
+    return day_start_utc <= listed_at < day_end_utc
 
 
 def list_ranked_listings(
@@ -127,12 +212,19 @@ def list_ranked_listings(
     source: str | None = None,
     bucket: str | None = None,
     limit: int = 50,
+    offset: int = 0,
+    report_date: date | None = None,
+    generated_at: datetime | None = None,
 ) -> list[ListingSummary]:
+    query_limit = limit + max(0, offset)
+    if report_date is not None and generated_at is not None:
+        query_limit = max((limit + max(0, offset)) * 5, 100)
+
     stmt = (
-        select(RawListing.listing_id)
+        select(RawListing)
         .join(DealScore, DealScore.listing_id == RawListing.listing_id)
         .order_by(DealScore.risk_adjusted_profit_jpy.desc())
-        .limit(limit)
+        .limit(query_limit)
     )
 
     if source:
@@ -143,15 +235,38 @@ def list_ranked_listings(
     else:
         stmt = stmt.where(DealScore.bucket.in_(["confident", "potential"]))
 
-    listing_ids = [listing_id for listing_id in session.scalars(stmt).all()]
+    listings = session.scalars(stmt).all()
 
-    results: list[ListingSummary] = []
-    for listing_id in listing_ids:
-        summary = get_listing_summary(session, listing_id)
-        if summary is not None:
-            results.append(summary)
+    filtered: list[RawListing] = []
+    for listing in listings:
+        if report_date is not None and generated_at is not None:
+            if not _is_in_report_window(listing, report_date=report_date, generated_at=generated_at):
+                continue
+        filtered.append(listing)
+        if len(filtered) >= (offset + limit):
+            break
 
+    paged = filtered[offset : offset + limit]
+    results = _build_listing_summaries(session, paged)
     return results
+
+
+def count_ranked_listings(
+    session: Session,
+    source: str | None = None,
+    bucket: str | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(RawListing).join(
+        DealScore,
+        DealScore.listing_id == RawListing.listing_id,
+    )
+    if source:
+        stmt = stmt.where(RawListing.source == source)
+    if bucket:
+        stmt = stmt.where(DealScore.bucket == bucket)
+    else:
+        stmt = stmt.where(DealScore.bucket.in_(["confident", "potential"]))
+    return int(session.scalar(stmt) or 0)
 
 
 def _render_markdown(
@@ -179,6 +294,11 @@ def _render_markdown(
             )
             lines.append(f"   - {item.listing_url}")
             lines.append(f"   - {item.rationale}")
+            if item.price_status != "valid":
+                lines.append(
+                    f"   - data_quality: price_status={item.price_status}; "
+                    f"risk_flags={', '.join(item.risk_flags) if item.risk_flags else 'none'}"
+                )
 
     lines.extend(["", "## Potential Good Deals", ""])
 
@@ -192,6 +312,11 @@ def _render_markdown(
             )
             lines.append(f"   - {item.listing_url}")
             lines.append(f"   - {item.rationale}")
+            if item.price_status != "valid":
+                lines.append(
+                    f"   - data_quality: price_status={item.price_status}; "
+                    f"risk_flags={', '.join(item.risk_flags) if item.risk_flags else 'none'}"
+                )
 
     lines.append("")
     return "\n".join(lines)
@@ -199,8 +324,20 @@ def _render_markdown(
 
 def generate_daily_report(session: Session, report_date: date) -> DailyReportResponse:
     generated_at = datetime.now(timezone.utc)
-    confident = list_ranked_listings(session, bucket="confident", limit=100)
-    potential = list_ranked_listings(session, bucket="potential", limit=100)
+    confident = list_ranked_listings(
+        session,
+        bucket="confident",
+        limit=100,
+        report_date=report_date,
+        generated_at=generated_at,
+    )
+    potential = list_ranked_listings(
+        session,
+        bucket="potential",
+        limit=100,
+        report_date=report_date,
+        generated_at=generated_at,
+    )
 
     markdown = _render_markdown(report_date, generated_at, confident, potential)
 
@@ -269,18 +406,10 @@ def get_daily_report(session: Session, report_date: date) -> DailyReportResponse
         .order_by(ReportItem.rank_position.asc())
     ).all()
 
-    confident: list[ListingSummary] = []
-    potential: list[ListingSummary] = []
-
-    for item in confident_items:
-        summary = get_listing_summary(session, item.listing_id)
-        if summary is not None:
-            confident.append(summary)
-
-    for item in potential_items:
-        summary = get_listing_summary(session, item.listing_id)
-        if summary is not None:
-            potential.append(summary)
+    ordered_ids = [item.listing_id for item in confident_items] + [item.listing_id for item in potential_items]
+    summary_map = _summary_map_for_listing_ids(session, ordered_ids)
+    confident = [summary_map[item.listing_id] for item in confident_items if item.listing_id in summary_map]
+    potential = [summary_map[item.listing_id] for item in potential_items if item.listing_id in summary_map]
 
     return DailyReportResponse(
         date=run.report_date,

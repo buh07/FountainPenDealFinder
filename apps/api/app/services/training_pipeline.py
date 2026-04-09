@@ -3,6 +3,9 @@ import sys
 from pathlib import Path
 
 from ..core.config import get_settings
+from .model_registry import fallback_artifact_path, promote_candidate_artifact, switch_active_to_version
+from .ops_telemetry import record_retrain_failure
+from .pricing_models import clear_model_artifact_cache
 
 
 def _repo_root() -> Path:
@@ -68,6 +71,27 @@ def run_baseline_training_pipeline() -> tuple[str, str]:
     ).strip()
 
     if build_proc.returncode != 0 or train_proc.returncode != 0 or eval_proc.returncode != 0:
+        record_retrain_failure("retrain_pipeline_command_failed")
         return "error", details
 
-    return "ok", details
+    promoted_versions: dict[str, str] = {}
+    try:
+        for task in ("resale", "auction"):
+            candidate_path = fallback_artifact_path(task)  # baseline path produced by train script
+            if not candidate_path.exists():
+                raise FileNotFoundError(f"missing candidate artifact for task={task}: {candidate_path}")
+            promoted = promote_candidate_artifact(task, candidate_path)
+            promoted_versions[task] = str(promoted["version_id"])
+
+        for task, version_id in promoted_versions.items():
+            switch_active_to_version(task, version_id)
+    except Exception as exc:
+        record_retrain_failure(f"retrain_publish_failed:{exc.__class__.__name__}")
+        return "error", f"{details}\n\nartifact_publish_error: {exc}"
+
+    clear_model_artifact_cache()
+    promotion_lines = "\n".join(
+        [f"- {task}: {version_id}" for task, version_id in sorted(promoted_versions.items())]
+    )
+    details_with_versions = f"{details}\n\npromoted_versions:\n{promotion_lines}"
+    return "ok", details_with_versions

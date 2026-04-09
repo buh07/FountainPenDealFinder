@@ -1,20 +1,27 @@
 {
   "artifact": "auction_baseline",
-  "version": "v1",
-  "trained_at": "2026-04-07T19:16:34.711571+00:00",
-  "rows_used": 8,
+  "version": "20260409T232829Z",
+  "trained_at": "2026-04-09T23:28:29.111951+00:00",
+  "rows_used": 5,
   "bid_bucket_expected_multipliers": {
-    "1_3": 1.3,
+    "1_3": 1.3139,
     "4_7": 1.3547,
     "8_plus": 1.4419
   },
   "bid_bucket_low_multipliers": {
-    "1_3": 1.2333,
-    "4_7": 1.2907,
+    "1_3": 1.3,
+    "4_7": 1.3479,
     "8_plus": 1.4419
   },
-  "default_expected_multiplier": 1.3378,
-  "default_low_multiplier": 1.2333,
+  "default_expected_multiplier": 1.3479,
+  "default_low_multiplier": 1.3,
   "max_resale_ratio": 0.92,
-  "confidence_base": 0.6
+  "confidence_base": 0.6,
+  "split_config": {
+    "strategy": "deterministic_hash",
+    "train_ratio": 0.8,
+    "rows_total": 8,
+    "rows_train": 5,
+    "rows_test": 3
+  }
 }

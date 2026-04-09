@@ -39,6 +39,18 @@ class FixtureListingSourceAdapter:
             return []
         return [item for item in payload if isinstance(item, dict)]
 
+    @staticmethod
+    def _annotate_stale_fallback(item: RawListingPayload) -> RawListingPayload:
+        raw_attributes = item.get("raw_attributes")
+        if not isinstance(raw_attributes, dict):
+            raw_attributes = {}
+        updated = dict(raw_attributes)
+        updated["fixture_stale_fallback"] = True
+
+        clone = dict(item)
+        clone["raw_attributes"] = updated
+        return clone
+
     def by_source(self, source: str) -> list[RawListingPayload]:
         return [item for item in self._load() if str(item.get("source") or "") == source]
 
@@ -84,6 +96,18 @@ class FixtureListingSourceAdapter:
                 continue
             if listed_at >= window_start:
                 rows.append(item)
+
+        if rows:
+            return rows
+
+        if source_filter and payload:
+            sorted_payload = sorted(
+                payload,
+                key=lambda item: (_parse_datetime(item.get("listed_at")) or datetime.min.replace(tzinfo=timezone.utc)),
+                reverse=True,
+            )
+            return [self._annotate_stale_fallback(item) for item in sorted_payload]
+
         return rows
 
     def get_ending_auctions(
@@ -101,6 +125,19 @@ class FixtureListingSourceAdapter:
             ends_at = _parse_datetime(item.get("ends_at"))
             if ends_at is None:
                 continue
-            if window_start <= ends_at <= window_end:
+            if window_start <= ends_at < window_end:
                 rows.append(item)
+
+        if rows:
+            return rows
+
+        if source_filter:
+            auction_payload = [item for item in payload if item.get("listing_format") == "auction"]
+            sorted_payload = sorted(
+                auction_payload,
+                key=lambda item: (_parse_datetime(item.get("ends_at")) or datetime.min.replace(tzinfo=timezone.utc)),
+                reverse=True,
+            )
+            return [self._annotate_stale_fallback(item) for item in sorted_payload]
+
         return rows

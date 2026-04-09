@@ -4,8 +4,17 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..schemas import CollectRunRequest, CollectRunResponse, EndingAuctionRefreshResponse
-from ..services.pipeline import run_collection_pipeline, run_ending_auction_refresh
+from ..schemas import (
+    CollectRunRequest,
+    CollectRunResponse,
+    EndingAuctionRefreshResponse,
+    PriorityAuctionRefreshResponse,
+)
+from ..services.pipeline import (
+    run_collection_pipeline,
+    run_ending_auction_refresh,
+    run_priority_auction_refresh,
+)
 
 router = APIRouter(prefix="/collect", tags=["collect"])
 
@@ -44,4 +53,28 @@ def refresh_ending_auctions(
         ingested_count=result["ingested_count"],
         scored_count=result["scored_count"],
         window_hours=result["window_hours"],
+    )
+
+
+@router.post("/refresh-priority", response_model=PriorityAuctionRefreshResponse)
+def refresh_priority_auctions(
+    window_hours: int = Query(default=2, ge=1, le=24),
+    threshold: float = Query(default=0.55, ge=0.0, le=1.0),
+    db: Session = Depends(get_db),
+) -> PriorityAuctionRefreshResponse:
+    started_at = datetime.now(timezone.utc)
+    result = run_priority_auction_refresh(
+        db,
+        window_hours=window_hours,
+        threshold=threshold,
+    )
+    finished_at = datetime.now(timezone.utc)
+    return PriorityAuctionRefreshResponse(
+        started_at=started_at,
+        finished_at=finished_at,
+        candidate_count=result["candidate_count"],
+        ingested_count=result["ingested_count"],
+        scored_count=result["scored_count"],
+        window_hours=result["window_hours"],
+        threshold=result["threshold"],
     )

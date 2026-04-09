@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-07T19:16:34.866313+00:00",
+  "generated_at": "2026-04-09T23:28:29.200471+00:00",
   "gates": {
     "overall_pass": true,
     "resale_pass": true,
@@ -11,11 +11,69 @@
   "metrics": {
     "resale": {
       "rows": 8,
-      "mape": 0.0649
+      "mape": 0.0639,
+      "wape": 0.0428,
+      "p95_ape": 0.1538,
+      "by_brand": {
+        "Montblanc": {
+          "rows": 1,
+          "mape": 0.1538
+        },
+        "Namiki": {
+          "rows": 1,
+          "mape": 0.006
+        },
+        "Pelikan": {
+          "rows": 1,
+          "mape": 0.0006
+        },
+        "Pilot": {
+          "rows": 2,
+          "mape": 0.0347
+        },
+        "Platinum": {
+          "rows": 1,
+          "mape": 0.0515
+        },
+        "Sailor": {
+          "rows": 1,
+          "mape": 0.0148
+        },
+        "Unknown": {
+          "rows": 1,
+          "mape": 0.2151
+        }
+      }
     },
     "auction": {
       "rows": 8,
-      "mape": 0.0214
+      "mape": 0.0229,
+      "wape": 0.0223,
+      "p95_ape": 0.0496,
+      "by_bid_bucket": {
+        "1_3": {
+          "rows": 3,
+          "mape": 0.0288
+        },
+        "4_7": {
+          "rows": 4,
+          "mape": 0.0241
+        },
+        "8_plus": {
+          "rows": 1,
+          "mape": 0.0
+        }
+      }
     }
+  },
+  "split": {
+    "strategy": "deterministic_hash",
+    "train_ratio": 0.8,
+    "resale_test_rows": 2,
+    "auction_test_rows": 3,
+    "resale_eval_mode": "all_rows_fallback_small_holdout",
+    "auction_eval_mode": "all_rows_fallback_small_holdout",
+    "resale_evaluated_rows": 8,
+    "auction_evaluated_rows": 8
   }
 }

@@ -7,8 +7,8 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 - `apps/api`: FastAPI internal API
 - `apps/worker`: scheduled collection and scoring worker
 - `apps/dashboard`: lightweight review UI
-- `apps/mcp-browser`: API-backed MCP-style browser wrapper (JavaScript)
-- `apps/mcp-pricing`: API-backed MCP-style pricing wrapper (JavaScript)
+- `apps/mcp-browser`: API-backed MCP SDK browser server over stdio (JavaScript)
+- `apps/mcp-pricing`: API-backed MCP SDK pricing server over stdio (JavaScript)
 - `packages/*`: shared modules and domain contracts
 - `data/*`: fixtures, taxonomy, labels, generated reports
 - `models/*`: model artifact placeholders
@@ -22,8 +22,10 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 - `POST /health/alerts/dispatch`
 - `POST /collect/run`
 - `GET /listings`
+- `GET /listings?limit=<n>&offset=<n>`
 - `GET /listings/{listing_id}`
 - `POST /collect/refresh-ending`
+- `POST /collect/refresh-priority`
 - `POST /score/{listing_id}`
 - `POST /predict/resale/{listing_id}`
 - `POST /predict/auction/{listing_id}`
@@ -31,7 +33,34 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 - `GET /proxy/top`
 - `POST /review/{listing_id}`
 - `POST /retrain/jobs`
+- `GET /retrain/models/{task}/active`
+- `GET /retrain/models/{task}/versions`
+- `POST /retrain/models/{task}/rollback`
 - `GET /reports/daily/{date}`
+- `GET /taxonomy/standard`
+
+## Taxonomy and Condition Standard
+
+- A canonical taxonomy standard now unifies ingestion labels and resale training labels:
+  - category (for example `japanese_core`, `japanese_premium`, `european_luxury`, `other`)
+  - canonical `brand` and `line`
+  - canonical `classification_id` (`brand_line` normalized)
+- Canonical condition grades are constrained to:
+  - `A`, `B+`, `B`, `C`, `Parts/Repair`
+- The standard is exposed at:
+  - `GET /taxonomy/standard`
+- Source rows and feedback rows are normalized to this standard before model training.
+
+## Feedback-Driven Autolabel Loop
+
+- Review payloads now support corrected brand/line/condition and pricing labels:
+  - `corrected_brand`, `corrected_line`, `corrected_condition_grade`
+  - `corrected_ask_price_jpy`, `corrected_sold_price_jpy`, `corrected_item_count`
+  - `taxonomy_aliases` (for adding aliases to new pen types)
+- Review corrections are persisted as training examples and can append:
+  - taxonomy type aliases to `TAXONOMY_FEEDBACK_TYPES_PATH`
+  - pricing feedback rows to `FEEDBACK_PRICING_LABELS_PATH`
+- Retrain pipeline (`build_historical_datasets.py` -> `train_baseline_models.py`) consumes these normalized feedback rows.
 
 ## Source Ingestion Status
 
@@ -40,6 +69,44 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 - Mercari: connected via `MercariAdapter` in `apps/api/app/adapters/mercari.py`
 - Rakuma: connected via `RakumaAdapter` in `apps/api/app/adapters/rakuma.py`
 - Fallback source: fixture data in `data/fixtures/listings_sample.json` is applied per-source when connector collection fails or returns empty.
+- Stale fixture behavior: when filtered fixture rows are empty for a source, latest per-source fixture rows are returned with `raw_attributes.fixture_stale_fallback=true`.
+
+## Price Quality Gating
+
+- Every listing now resolves to `price_status` in API summaries:
+  - `valid`: any positive `current_price_jpy` or `price_buy_now_jpy`
+  - `missing`: no positive price and no parser-failure marker
+  - `parse_error`: no positive price and `raw_attributes.price_parse_error=true`
+- `missing` listings are forced to `discard` with neutralized profit outputs.
+- `parse_error` listings trigger one repair attempt (text fallback + detail fetch). If unresolved, they remain `potential` with neutralized profit and review flags.
+- API listing responses include `risk_flags` to expose these data-quality states.
+
+## Multi-Stage Classification
+
+- Classification now runs a 6-stage flow:
+  - Stage 1 text candidate extraction
+  - Stage 2 optional image-assisted disambiguation (`IMAGE_CLASSIFIER_ENABLED`)
+  - Stage 3 lot decomposition
+  - Stage 4 taxonomy resolution
+  - Stage 5 canonical condition normalization (`A`, `B+`, `B`, `C`, `Parts/Repair`)
+  - Stage 6 uncertainty tags + explanation payload
+- If image stage is disabled or image evidence is unavailable, classification falls back to text-only behavior.
+
+## Model Version Lifecycle
+
+- Retrain now publishes immutable timestamped artifacts per task (`resale`, `auction`) under `MODEL_VERSION_ROOT`.
+- Inference resolves artifacts through active pointer files:
+  - `MODEL_ACTIVE_POINTER_RESALE`
+  - `MODEL_ACTIVE_POINTER_AUCTION`
+- Pointer switching happens only after successful retrain/evaluation gate.
+- Rollback is supported through:
+  - `POST /retrain/models/{task}/rollback`
+
+## Report Window Rules
+
+- Daily reports use timezone-aware filtering:
+  - Fixed-price listings: report-date day window in `DEFAULT_TIMEZONE`.
+  - Auctions: rolling `[generated_at, generated_at+24h)` and only when `ends_at` is known.
 
 ## Pricing vs Proxy Tracking
 
@@ -53,29 +120,49 @@ Personal deal-finding system for Japanese fountain-pen marketplaces.
 - One full run:
 
 ```bash
-python -m apps.worker.worker --once
+python3 -m apps.worker.worker --once
 ```
 
 - One ending-auction refresh run:
 
 ```bash
-python -m apps.worker.worker --ending-refresh-once --ending-window-hours 24
+python3 -m apps.worker.worker --ending-refresh-once --ending-window-hours 24
+```
+
+- One priority refresh run:
+
+```bash
+python3 -m apps.worker.worker --priority-refresh-once --priority-window-hours 2 --priority-score-threshold 0.55
 ```
 
 - Recurring scheduler loop:
 
 ```bash
-python -m apps.worker.worker --daemon
+python3 -m apps.worker.worker --daemon
 ```
 
 Worker cadence defaults are configurable via `.env`:
 
 - `WORKER_FIXED_SOURCE_INTERVAL_SECONDS`
 - `WORKER_ENDING_AUCTIONS_INTERVAL_SECONDS`
+- `WORKER_PRIORITY_INTERVAL_SECONDS`
 - `WORKER_IDLE_SLEEP_SECONDS`
 - `WORKER_ENDING_AUCTION_WINDOW_HOURS`
+- `WORKER_PRIORITY_WINDOW_HOURS`
+- `PRIORITY_SCORE_THRESHOLD`
 - `WORKER_DISPATCH_HEALTH_ALERTS`
 - `WORKER_HEALTH_ALERT_WINDOW_HOURS`
+
+## Object Storage Capture
+
+- Local object storage captures listing assets with metadata persisted in `listing_asset`.
+- Captured asset types:
+  - `page_capture` (HTML/text payload capture)
+  - `image` (downloaded listing images)
+- Capture behavior is policy-driven and disabled by default:
+  - `OBJECT_STORE_ENABLE_CAPTURE`
+  - `OBJECT_STORE_CAPTURE_POLICY` (`none`, `all`, `scored_only`, `ending_soon_only`, `scored_or_ending_soon`)
+  - `OBJECT_STORE_ROOT`
 
 ## Quick Start
 
@@ -117,18 +204,24 @@ curl -X POST http://localhost:8000/collect/run
 curl -X POST 'http://localhost:8000/collect/refresh-ending?window_hours=24'
 ```
 
+1. Trigger high-priority ending-auctions refresh:
+
+```bash
+curl -X POST 'http://localhost:8000/collect/refresh-priority?window_hours=2&threshold=0.55'
+```
+
 1. Open dashboard review UI:
 
 ```bash
-python -m http.server 8080 -d apps/dashboard/public
+python3 -m http.server 8080 -d apps/dashboard/public
 ```
 
 1. Build historical datasets + train baseline artifacts:
 
 ```bash
-python scripts/build_historical_datasets.py
-python scripts/train_baseline_models.py
-python scripts/evaluate_baseline_models.py --report-path models/eval/baseline_eval_v1.json
+python3 scripts/build_historical_datasets.py
+python3 scripts/train_baseline_models.py
+python3 scripts/evaluate_baseline_models.py --report-path models/eval/baseline_eval_v1.json
 ```
 
 1. Run the same build/train/evaluate pipeline through API:
@@ -140,8 +233,11 @@ curl -X POST http://localhost:8000/retrain/jobs
 ## Baseline Model Gate
 
 - Retrain jobs now run three steps: dataset build, training, and evaluation gate.
+- Training/evaluation now use a deterministic hash split (default `train_ratio=0.8`), and gate metrics are computed on holdout rows.
 - Evaluation report is written to `BASELINE_EVAL_REPORT_PATH` (default: `models/eval/baseline_eval_v1.json`).
+- Evaluation report includes `MAPE`, `WAPE`, and `P95_APE` summaries.
 - Retrain endpoint returns `status=error` if evaluation gates fail.
+- On success, retrain publishes versioned artifacts and flips active pointers.
 
 Gate-related `.env` settings:
 
@@ -149,6 +245,9 @@ Gate-related `.env` settings:
 - `BASELINE_EVAL_MIN_ROWS`
 - `BASELINE_EVAL_RESALE_MAX_MAPE`
 - `BASELINE_EVAL_AUCTION_MAX_MAPE`
+- `MODEL_VERSION_ROOT`
+- `MODEL_ACTIVE_POINTER_RESALE`
+- `MODEL_ACTIVE_POINTER_AUCTION`
 
 ## Monitoring and Tests
 
@@ -167,11 +266,32 @@ curl -X POST 'http://localhost:8000/health/alerts/dispatch?window_hours=24'
 - Alert/webhook settings:
 - `MONITORING_ALERT_WEBHOOK_URL`
 - `MONITORING_ALERT_WEBHOOK_TIMEOUT_SECONDS`
+- `MONITORING_ALERT_DEDUPE_WINDOW_SECONDS`
+- `MONITORING_ALERT_RETRY_ATTEMPTS`
+- `MONITORING_ALERT_RETRY_BACKOFF_SECONDS`
+- `MONITORING_MAX_MODEL_AGE_HOURS`
+- `TAXONOMY_SEED_PATH`
+- `TAXONOMY_FEEDBACK_TYPES_PATH`
+- `FEEDBACK_PRICING_LABELS_PATH`
+- `CORS_ALLOW_ORIGINS`
+- `CORS_ALLOW_METHODS`
+- `CORS_ALLOW_HEADERS`
+- `PROXY_COUPON_MAX_EXACT_STACKABLE`
+- `PROXY_COUPON_FALLBACK_TOP_STACKABLE`
+- `IMAGE_CLASSIFIER_BLEND_MIN_CONFIDENCE`
+
+- Alert dispatch reliability:
+- dispatch events are persisted to `health_alert_event` for audit/history
+- duplicate alert signatures are rate-limited within cooldown and return `reason=deduped_recent_alert`
+- transient webhook failures now retry with exponential backoff before failing
+- dispatch responses include dedupe metadata (`deduped`, `cooldown_remaining_seconds`, `alert_signature`)
+- health metrics also surface ingestion/retrain failure telemetry counters and latest failure reason fields
+- health metrics also expose active model version IDs and model age (hours), with stale-model alerts
 
 - Parser regression and monitoring tests:
 
 ```bash
-python -m pytest apps/api/tests -q
+python3 -m pytest apps/api/tests -q
 ```
 
 ## Migration Commands

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
+import hashlib
 import json
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -33,6 +35,25 @@ def _p10(values: list[float]) -> float:
     return ordered[idx]
 
 
+def _row_split(row: dict[str, str], train_ratio: float) -> str:
+    normalized_ratio = min(0.95, max(0.05, float(train_ratio)))
+    fingerprint = "|".join(f"{key}={row.get(key, '')}" for key in sorted(row.keys()))
+    digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()
+    bucket = int(digest[:8], 16) / 0xFFFFFFFF
+    return "train" if bucket < normalized_ratio else "test"
+
+
+def _split_rows(rows: list[dict[str, str]], train_ratio: float) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    train_rows: list[dict[str, str]] = []
+    test_rows: list[dict[str, str]] = []
+    for row in rows:
+        if _row_split(row, train_ratio) == "train":
+            train_rows.append(row)
+        else:
+            test_rows.append(row)
+    return train_rows, test_rows
+
+
 def train_resale_model(rows: list[dict[str, str]]) -> dict:
     clean_rows: list[dict] = []
     for row in rows:
@@ -43,6 +64,7 @@ def train_resale_model(rows: list[dict[str, str]]) -> dict:
         clean_rows.append(
             {
                 "brand": row.get("brand") or "Unknown",
+                "classification_id": row.get("classification_id") or "unknown_fountain_pen",
                 "condition_grade": row.get("condition_grade") or "B",
                 "item_count": max(1, int(float(row.get("item_count") or 1))),
                 "ask_price_jpy": ask,
@@ -55,11 +77,13 @@ def train_resale_model(rows: list[dict[str, str]]) -> dict:
         return {}
 
     brand_ratios: dict[str, list[float]] = defaultdict(list)
+    line_ratios: dict[str, list[float]] = defaultdict(list)
     condition_ratios: dict[str, list[float]] = defaultdict(list)
     lot_uplifts: list[float] = []
 
     for row in clean_rows:
         brand_ratios[row["brand"]].append(row["ratio"])
+        line_ratios[row["classification_id"]].append(row["ratio"])
         condition_ratios[row["condition_grade"]].append(row["ratio"])
 
         if row["item_count"] > 1:
@@ -72,6 +96,11 @@ def train_resale_model(rows: list[dict[str, str]]) -> dict:
         brand: round(median(values), 4)
         for brand, values in sorted(brand_ratios.items())
     }
+    line_multipliers = {
+        classification_id: round(median(values), 4)
+        for classification_id, values in sorted(line_ratios.items())
+        if len(values) >= 2
+    }
 
     condition_penalties = {}
     for condition, values in sorted(condition_ratios.items()):
@@ -83,7 +112,8 @@ def train_resale_model(rows: list[dict[str, str]]) -> dict:
 
     rel_errors: list[float] = []
     for row in clean_rows:
-        brand_mult = brand_multipliers.get(row["brand"], default_multiplier)
+        line_mult = line_multipliers.get(row["classification_id"])
+        brand_mult = float(line_mult) if line_mult is not None else brand_multipliers.get(row["brand"], default_multiplier)
         cond_penalty = condition_penalties.get(row["condition_grade"], 1.0)
         pred = row["ask_price_jpy"] * brand_mult * cond_penalty
         if row["item_count"] > 1:
@@ -94,11 +124,13 @@ def train_resale_model(rows: list[dict[str, str]]) -> dict:
 
     return {
         "artifact": "resale_baseline",
-        "version": "v1",
+        "version": "unknown",
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "rows_used": len(clean_rows),
         "default_multiplier": round(default_multiplier, 4),
         "brand_multipliers": brand_multipliers,
+        "line_multipliers": line_multipliers,
+        "line_min_samples": 2,
         "condition_penalties": condition_penalties,
         "default_condition_penalty": 0.85,
         "lot_item_uplift": round(float(lot_item_uplift), 4),
@@ -153,7 +185,7 @@ def train_auction_model(rows: list[dict[str, str]]) -> dict:
     overall = [row["ratio"] for row in clean_rows]
     return {
         "artifact": "auction_baseline",
-        "version": "v1",
+        "version": "unknown",
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "rows_used": len(clean_rows),
         "bid_bucket_expected_multipliers": expected_multipliers,
@@ -166,11 +198,54 @@ def train_auction_model(rows: list[dict[str, str]]) -> dict:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Train baseline resale/auction models")
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.8,
+        help="Deterministic hash split train ratio in (0,1)",
+    )
+    parser.add_argument(
+        "--artifact-version",
+        type=str,
+        default="",
+        help="Optional artifact version metadata override",
+    )
+    args = parser.parse_args()
+
+    train_ratio = min(0.95, max(0.05, float(args.train_ratio)))
+    artifact_version = (
+        args.artifact_version.strip()
+        or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    )
+
     resale_rows = _read_csv(DATA_DIR / "pen_swap_sales.csv")
     auction_rows = _read_csv(DATA_DIR / "yahoo_auction_outcomes.csv")
 
-    resale_artifact = train_resale_model(resale_rows)
-    auction_artifact = train_auction_model(auction_rows)
+    resale_train_rows, resale_test_rows = _split_rows(resale_rows, train_ratio)
+    auction_train_rows, auction_test_rows = _split_rows(auction_rows, train_ratio)
+
+    resale_artifact = train_resale_model(resale_train_rows)
+    auction_artifact = train_auction_model(auction_train_rows)
+
+    if resale_artifact:
+        resale_artifact["version"] = artifact_version
+        resale_artifact["split_config"] = {
+            "strategy": "deterministic_hash",
+            "train_ratio": train_ratio,
+            "rows_total": len(resale_rows),
+            "rows_train": len(resale_train_rows),
+            "rows_test": len(resale_test_rows),
+        }
+    if auction_artifact:
+        auction_artifact["version"] = artifact_version
+        auction_artifact["split_config"] = {
+            "strategy": "deterministic_hash",
+            "train_ratio": train_ratio,
+            "rows_total": len(auction_rows),
+            "rows_train": len(auction_train_rows),
+            "rows_test": len(auction_test_rows),
+        }
 
     MODEL_DIR_RESALE.mkdir(parents=True, exist_ok=True)
     MODEL_DIR_AUCTION.mkdir(parents=True, exist_ok=True)
@@ -189,8 +264,13 @@ def main() -> None:
 
     print(
         "trained baseline models: "
-        f"resale_rows={len(resale_rows)} "
-        f"auction_rows={len(auction_rows)}"
+        f"resale_rows_total={len(resale_rows)} "
+        f"resale_train={len(resale_train_rows)} "
+        f"resale_test={len(resale_test_rows)} "
+        f"auction_rows_total={len(auction_rows)} "
+        f"auction_train={len(auction_train_rows)} "
+        f"auction_test={len(auction_test_rows)} "
+        f"artifact_version={artifact_version}"
     )
 
 

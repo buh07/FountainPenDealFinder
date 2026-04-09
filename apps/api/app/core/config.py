@@ -1,5 +1,8 @@
 from functools import lru_cache
+from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,11 +62,17 @@ class Settings(BaseSettings):
     worker_enable_scheduler: bool = False
     worker_fixed_source_interval_seconds: int = 3600
     worker_ending_auctions_interval_seconds: int = 900
+    worker_priority_interval_seconds: int = 300
     worker_idle_sleep_seconds: int = 10
     worker_ending_auction_window_hours: int = 24
+    worker_priority_window_hours: int = 2
+    priority_score_threshold: float = 0.55
 
     resale_model_artifact_path: str = "models/resale/baseline_v1.json"
     auction_model_artifact_path: str = "models/yahoo-auction/baseline_v1.json"
+    model_version_root: str = "models/versions"
+    model_active_pointer_resale: str = "models/resale/active_pointer.txt"
+    model_active_pointer_auction: str = "models/yahoo-auction/active_pointer.txt"
     baseline_eval_report_path: str = "models/eval/baseline_eval_v1.json"
     baseline_eval_min_rows: int = 5
     baseline_eval_resale_max_mape: float = 0.5
@@ -75,11 +84,37 @@ class Settings(BaseSettings):
     monitoring_max_false_positive_rate: float = 0.6
     monitoring_alert_webhook_url: str = ""
     monitoring_alert_webhook_timeout_seconds: int = 10
+    monitoring_alert_dedupe_window_seconds: int = 3600
+    monitoring_alert_retry_attempts: int = 3
+    monitoring_alert_retry_backoff_seconds: float = 1.0
+    monitoring_max_model_age_hours: int = 24 * 30
     worker_dispatch_health_alerts: bool = False
     worker_health_alert_window_hours: int = 24
 
+    cors_allow_origins: str = (
+        "http://localhost:3000,"
+        "http://127.0.0.1:3000,"
+        "http://localhost:5173,"
+        "http://127.0.0.1:5173"
+    )
+    cors_allow_methods: str = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+    cors_allow_headers: str = "Authorization,Content-Type,Accept,Origin,X-Requested-With"
+
     fixture_listings_path: str = "data/fixtures/listings_sample.json"
+    taxonomy_seed_path: str = "data/taxonomy/taxonomy_v1_seed.csv"
+    taxonomy_feedback_types_path: str = "data/taxonomy/taxonomy_feedback_types.jsonl"
+    feedback_pricing_labels_path: str = "data/labeled/raw/pen_swap_sales_feedback.jsonl"
     reports_dir: str = "data/reports"
+    object_store_root: str = "data/object_store"
+    object_store_enable_capture: bool = False
+    object_store_capture_policy: str = "scored_or_ending_soon"
+    object_store_generate_thumbnails: bool = False
+    object_store_thumbnail_max_px: int = 320
+    image_classifier_enabled: bool = False
+    image_embedding_model_name: str = "local-hash-v1"
+    image_classifier_blend_min_confidence: float = 0.6
+    proxy_coupon_max_exact_stackable: int = 16
+    proxy_coupon_fallback_top_stackable: int = 12
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -87,6 +122,71 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def _validate_thresholds(self) -> "Settings":
+        if not 0.0 <= self.min_profit_pct <= 1.0:
+            raise ValueError("MIN_PROFIT_PCT must be in [0, 1]")
+        if not 0.0 <= self.potential_min <= 1.0:
+            raise ValueError("POTENTIAL_MIN must be in [0, 1]")
+        if not 0.0 <= self.confident_min <= 1.0:
+            raise ValueError("CONFIDENT_MIN must be in [0, 1]")
+        if self.confident_min < self.potential_min:
+            raise ValueError("CONFIDENT_MIN must be greater than or equal to POTENTIAL_MIN")
+        if not 0.0 <= self.monitoring_min_non_discard_rate <= 1.0:
+            raise ValueError("MONITORING_MIN_NON_DISCARD_RATE must be in [0, 1]")
+        if not 0.0 <= self.monitoring_max_false_positive_rate <= 1.0:
+            raise ValueError("MONITORING_MAX_FALSE_POSITIVE_RATE must be in [0, 1]")
+        if self.monitoring_alert_retry_attempts < 1:
+            raise ValueError("MONITORING_ALERT_RETRY_ATTEMPTS must be >= 1")
+        if self.monitoring_alert_retry_backoff_seconds < 0:
+            raise ValueError("MONITORING_ALERT_RETRY_BACKOFF_SECONDS must be >= 0")
+        if self.monitoring_max_model_age_hours < 1:
+            raise ValueError("MONITORING_MAX_MODEL_AGE_HOURS must be >= 1")
+        if self.worker_priority_interval_seconds < 60:
+            raise ValueError("WORKER_PRIORITY_INTERVAL_SECONDS must be >= 60")
+        if self.worker_priority_window_hours < 1:
+            raise ValueError("WORKER_PRIORITY_WINDOW_HOURS must be >= 1")
+        if not 0.0 <= self.priority_score_threshold <= 1.0:
+            raise ValueError("PRIORITY_SCORE_THRESHOLD must be in [0, 1]")
+        if self.object_store_thumbnail_max_px < 32:
+            raise ValueError("OBJECT_STORE_THUMBNAIL_MAX_PX must be >= 32")
+        if not 0.0 <= self.image_classifier_blend_min_confidence <= 1.0:
+            raise ValueError("IMAGE_CLASSIFIER_BLEND_MIN_CONFIDENCE must be in [0, 1]")
+        if self.proxy_coupon_max_exact_stackable < 1:
+            raise ValueError("PROXY_COUPON_MAX_EXACT_STACKABLE must be >= 1")
+        if self.proxy_coupon_fallback_top_stackable < 1:
+            raise ValueError("PROXY_COUPON_FALLBACK_TOP_STACKABLE must be >= 1")
+        if self.proxy_coupon_fallback_top_stackable > self.proxy_coupon_max_exact_stackable:
+            raise ValueError(
+                "PROXY_COUPON_FALLBACK_TOP_STACKABLE must be <= PROXY_COUPON_MAX_EXACT_STACKABLE"
+            )
+        allowed_capture_policies = {
+            "none",
+            "all",
+            "scored_only",
+            "ending_soon_only",
+            "scored_or_ending_soon",
+        }
+        if self.object_store_capture_policy not in allowed_capture_policies:
+            raise ValueError(
+                "OBJECT_STORE_CAPTURE_POLICY must be one of: "
+                "none, all, scored_only, ending_soon_only, scored_or_ending_soon"
+            )
+        try:
+            ZoneInfo(self.default_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"DEFAULT_TIMEZONE is not a valid IANA timezone: {self.default_timezone}") from exc
+        webhook_url = self.monitoring_alert_webhook_url.strip()
+        if webhook_url:
+            parsed = urlparse(webhook_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("MONITORING_ALERT_WEBHOOK_URL must be a valid http(s) URL")
+        if "*" in [method.strip() for method in self.cors_allow_methods.split(",")]:
+            raise ValueError("CORS_ALLOW_METHODS cannot contain '*'")
+        if "*" in [header.strip() for header in self.cors_allow_headers.split(",")]:
+            raise ValueError("CORS_ALLOW_HEADERS cannot contain '*'")
+        return self
 
 
 @lru_cache(maxsize=1)

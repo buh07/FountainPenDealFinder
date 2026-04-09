@@ -5,6 +5,7 @@ from app.adapters.mercari import MercariAdapter
 from app.adapters.rakuma import RakumaAdapter
 from app.adapters.yahoo_auctions import YahooAuctionsAdapter
 from app.adapters.yahoo_flea_market import YahooFleaMarketAdapter
+from app.adapters.html_helpers import parse_price_with_status
 from app.services.pipeline import _collect_with_retries, _filter_parse_complete_rows
 
 
@@ -32,6 +33,7 @@ def test_yahoo_auctions_ldjson_parser_extracts_required_fields(monkeypatch):
     assert row["url"].startswith("https://")
     assert row["title"]
     assert row["current_price_jpy"] > 0
+    assert not row.get("raw_attributes", {}).get("price_parse_error", False)
 
 
 def test_yahoo_flea_market_parser_extracts_required_fields(monkeypatch):
@@ -50,6 +52,7 @@ def test_yahoo_flea_market_parser_extracts_required_fields(monkeypatch):
     assert row["source_listing_id"] == "yf-4004"
     assert row["current_price_jpy"] == 98000
     assert row["title"]
+    assert not row.get("raw_attributes", {}).get("price_parse_error", False)
 
 
 def test_mercari_parser_extracts_required_fields(monkeypatch):
@@ -68,6 +71,7 @@ def test_mercari_parser_extracts_required_fields(monkeypatch):
     assert row["source_listing_id"] == "m1234567890"
     assert row["current_price_jpy"] == 28000
     assert row["title"]
+    assert not row.get("raw_attributes", {}).get("price_parse_error", False)
 
 
 def test_rakuma_parser_extracts_required_fields(monkeypatch):
@@ -86,6 +90,54 @@ def test_rakuma_parser_extracts_required_fields(monkeypatch):
     assert row["source_listing_id"] == "rk-3003"
     assert row["current_price_jpy"] == 17000
     assert row["title"]
+    assert not row.get("raw_attributes", {}).get("price_parse_error", False)
+
+
+def test_yahoo_auctions_ending_filter_excludes_unknown_ends_at(monkeypatch):
+    adapter = YahooAuctionsAdapter()
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(
+        adapter,
+        "_search_internal",
+        lambda keyword: [
+            {
+                "source": "yahoo_auctions",
+                "source_listing_id": "known-1",
+                "url": "https://example.com/known-1",
+                "title": "Known End",
+                "listing_format": "auction",
+                "current_price_jpy": 12000,
+                "ends_at": (now + timedelta(hours=2)).isoformat(),
+            },
+            {
+                "source": "yahoo_auctions",
+                "source_listing_id": "unknown-1",
+                "url": "https://example.com/unknown-1",
+                "title": "Unknown End",
+                "listing_format": "auction",
+                "current_price_jpy": 12000,
+                "ends_at": None,
+            },
+            {
+                "source": "yahoo_auctions",
+                "source_listing_id": "boundary-1",
+                "url": "https://example.com/boundary-1",
+                "title": "Boundary End",
+                "listing_format": "auction",
+                "current_price_jpy": 12000,
+                "ends_at": (now + timedelta(hours=24)).isoformat(),
+            },
+        ],
+    )
+
+    rows = adapter.get_ending_auctions(
+        window_start=now,
+        window_end=now + timedelta(hours=24),
+        category="fountain_pen",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["source_listing_id"] == "known-1"
 
 
 def test_parse_completeness_filter_keeps_only_complete_rows():
@@ -143,3 +195,25 @@ def test_collect_with_retries_recovers_from_transient_failure():
     assert calls["count"] == 2
     assert len(rows) == 1
     assert rows[0]["source_listing_id"] == "a-1"
+
+
+def test_parse_price_with_status_marks_non_numeric_price_signal_as_parse_error():
+    price, parse_error = parse_price_with_status("価格: --")
+    assert price is None
+    assert parse_error is True
+
+    price, parse_error = parse_price_with_status("No price shown")
+    assert price is None
+    assert parse_error is False
+
+    price, parse_error = parse_price_with_status("即決 ¥12,000")
+    assert price == 12000
+    assert parse_error is False
+
+    price, parse_error = parse_price_with_status("価格：￥１２ ３４５")
+    assert price == 12345
+    assert parse_error is False
+
+    price, parse_error = parse_price_with_status("Price:\n¥ 1 000")
+    assert price == 1000
+    assert parse_error is False

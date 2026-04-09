@@ -1,6 +1,6 @@
-import json
 import hashlib
-import re
+import json
+import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..adapters.fixture_source import FixtureListingSourceAdapter
+from ..adapters.html_helpers import extract_price_jpy
 from ..adapters.mercari import MercariAdapter
 from ..adapters.rakuma import RakumaAdapter
 from ..adapters.yahoo_auctions import YahooAuctionsAdapter
@@ -23,8 +24,23 @@ from ..models import (
     RawListing,
     ValuationPrediction,
 )
+from .listing_quality import derive_price_status, get_default_timezone, has_positive_price, parse_raw_attributes, to_utc
+from .classification_pipeline import classify_listing_multi_stage
+from .object_store import capture_listing_assets
+from .ops_telemetry import record_ingestion_failure
 from .pricing_models import predict_auction_value, predict_resale_value
 from .proxy_tracker import estimate_proxy_deals, upsert_proxy_deals
+
+
+logger = logging.getLogger(__name__)
+
+
+SOURCE_ADAPTER_FACTORIES = {
+    "yahoo_auctions": YahooAuctionsAdapter,
+    "yahoo_flea_market": YahooFleaMarketAdapter,
+    "mercari": MercariAdapter,
+    "rakuma": RakumaAdapter,
+}
 
 
 def _to_json(value: Any) -> str:
@@ -45,9 +61,10 @@ def _parse_datetime(value: str | None) -> datetime | None:
         return None
     normalized = value.replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
+    return to_utc(parsed)
 
 
 def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -61,16 +78,38 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(deduped.values())
 
 
+def _raw_attributes_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_attributes = payload.get("raw_attributes")
+    if isinstance(raw_attributes, dict):
+        return dict(raw_attributes)
+    return {}
+
+
+def _set_payload_raw_attributes(payload: dict[str, Any], raw_attributes: dict[str, Any]) -> None:
+    payload["raw_attributes"] = raw_attributes
+
+
+def _payload_price_status(payload: dict[str, Any]) -> str:
+    return derive_price_status(
+        payload.get("current_price_jpy"),
+        payload.get("price_buy_now_jpy"),
+        _raw_attributes_from_payload(payload),
+    )
+
+
 def _row_completeness(payload: dict[str, Any]) -> float:
+    raw_attributes = _raw_attributes_from_payload(payload)
+    has_price_data = has_positive_price(
+        payload.get("current_price_jpy"),
+        payload.get("price_buy_now_jpy"),
+    ) or bool(raw_attributes.get("price_parse_error"))
+
     fields = [
         bool(payload.get("source_listing_id") or payload.get("listing_id")),
         bool(payload.get("url")),
         bool(payload.get("title")),
         bool(payload.get("listing_format") or payload.get("listing_type")),
-        (
-            payload.get("current_price_jpy") is not None
-            or payload.get("price_buy_now_jpy") is not None
-        ),
+        has_price_data,
     ]
     return sum(1 for field in fields if field) / max(1, len(fields))
 
@@ -92,6 +131,7 @@ def _collect_with_retries(
     backoff_seconds: float,
     min_completeness: float,
     min_valid_rows: int,
+    source_label: str = "unknown_source",
 ) -> list[dict[str, Any]]:
     safe_attempts = max(1, attempts)
     last_valid: list[dict[str, Any]] = []
@@ -105,8 +145,19 @@ def _collect_with_retries(
             if len(candidate_rows) >= min_valid_rows:
                 return candidate_rows
             last_valid = candidate_rows
+            if min_valid_rows > 0:
+                record_ingestion_failure(
+                    f"{source_label}:insufficient_valid_rows:{len(candidate_rows)}/{min_valid_rows}"
+                )
         except Exception:
-            pass
+            logger.exception(
+                "Marketplace fetch failed on retry",
+                extra={
+                    "attempt_index": attempt_index + 1,
+                    "attempt_total": safe_attempts,
+                },
+            )
+            record_ingestion_failure(f"{source_label}:fetch_exception")
 
         if attempt_index < safe_attempts - 1:
             sleep_seconds = max(0.0, backoff_seconds) * (2**attempt_index)
@@ -116,10 +167,105 @@ def _collect_with_retries(
     return last_valid
 
 
+def _apply_text_price_repair(payload: dict[str, Any], raw_attributes: dict[str, Any]) -> bool:
+    text_blob = " ".join(
+        str(part or "")
+        for part in [
+            payload.get("title"),
+            payload.get("description_raw"),
+            payload.get("condition_text"),
+        ]
+    )
+    repaired_price = extract_price_jpy(text_blob)
+    if repaired_price is None or repaired_price <= 0:
+        return False
+
+    payload["current_price_jpy"] = int(repaired_price)
+    listing_format = str(payload.get("listing_format") or payload.get("listing_type") or "")
+    if listing_format == "buy_now":
+        payload["price_buy_now_jpy"] = int(repaired_price)
+
+    raw_attributes.pop("price_parse_error", None)
+    raw_attributes["price_repaired_from"] = "text_fallback"
+    return True
+
+
+def _apply_detail_price_repair(payload: dict[str, Any], raw_attributes: dict[str, Any]) -> bool:
+    source = str(payload.get("source") or payload.get("marketplace") or "")
+    source_listing_id = str(payload.get("source_listing_id") or payload.get("listing_id") or "")
+    factory = SOURCE_ADAPTER_FACTORIES.get(source)
+    if factory is None or not source_listing_id:
+        return False
+
+    try:
+        detail = factory().fetch_listing_detail(source_listing_id)
+    except Exception:
+        logger.exception(
+            "Detail price repair fetch failed",
+            extra={
+                "source": source,
+                "source_listing_id": source_listing_id,
+            },
+        )
+        record_ingestion_failure(f"{source}:detail_price_repair_fetch_exception")
+        return False
+    if not detail:
+        return False
+
+    detail_price = int(detail.get("price_buy_now_jpy") or detail.get("current_price_jpy") or 0)
+    if detail_price > 0:
+        payload["current_price_jpy"] = detail_price
+        listing_format = str(payload.get("listing_format") or payload.get("listing_type") or "")
+        if listing_format == "buy_now":
+            payload["price_buy_now_jpy"] = detail_price
+
+        raw_attributes.pop("price_parse_error", None)
+        raw_attributes["price_repaired_from"] = "detail_fetch"
+        return True
+
+    detail_raw_attributes = parse_raw_attributes(detail.get("raw_attributes"))
+    if detail_raw_attributes.get("price_parse_error"):
+        raw_attributes["price_parse_error"] = True
+    return False
+
+
+def _prepare_listing_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    prepared = dict(payload)
+    raw_attributes = _raw_attributes_from_payload(prepared)
+    _set_payload_raw_attributes(prepared, raw_attributes)
+
+    if _payload_price_status(prepared) == "parse_error":
+        raw_attributes["price_repair_attempted"] = True
+        if not _apply_text_price_repair(prepared, raw_attributes):
+            _apply_detail_price_repair(prepared, raw_attributes)
+
+    return prepared
+
+
+def _filter_known_ending_rows(
+    rows: list[dict[str, Any]],
+    window_start: datetime,
+    window_end: datetime,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        ends_at = _parse_datetime(str(row.get("ends_at") or ""))
+        if ends_at is None:
+            continue
+        if window_start <= ends_at < window_end:
+            filtered.append(row)
+    return filtered
+
+
 def load_marketplace_listings() -> list[dict[str, Any]]:
     settings = get_settings()
+    default_tz = get_default_timezone(settings.default_timezone)
+
+    local_now = datetime.now(default_tz)
+    day_start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_utc = day_start_local.astimezone(timezone.utc)
+
     now = datetime.now(timezone.utc)
-    day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
     rows: list[dict[str, Any]] = []
     fixture = FixtureListingSourceAdapter()
 
@@ -135,13 +281,14 @@ def load_marketplace_listings() -> list[dict[str, Any]]:
             source_rows.extend(
                 _collect_with_retries(
                     fetch_fn=lambda: adapter.get_fresh_window_listings(
-                        day_start,
+                        day_start_utc,
                         category="fountain_pen",
                     ),
                     attempts=settings.ingestion_retry_attempts,
                     backoff_seconds=settings.ingestion_retry_backoff_seconds,
                     min_completeness=settings.ingestion_parse_min_completeness,
                     min_valid_rows=settings.ingestion_parse_min_valid_rows,
+                    source_label=f"{source_name}:fresh",
                 )
             )
 
@@ -157,13 +304,14 @@ def load_marketplace_listings() -> list[dict[str, Any]]:
                         backoff_seconds=settings.ingestion_retry_backoff_seconds,
                         min_completeness=settings.ingestion_parse_min_completeness,
                         min_valid_rows=0,
+                        source_label=f"{source_name}:ending",
                     )
                 )
 
         if (not source_rows) and settings.use_fixture_fallback:
             source_rows.extend(
                 fixture.get_fresh_window_listings(
-                    day_start,
+                    day_start_utc,
                     category="fountain_pen",
                     source_filter=source_name,
                 )
@@ -219,6 +367,8 @@ def load_marketplace_listings() -> list[dict[str, Any]]:
 def load_ending_auction_rows(window_hours: int) -> list[dict[str, Any]]:
     settings = get_settings()
     now = datetime.now(timezone.utc)
+    window_end = now + timedelta(hours=max(1, window_hours))
+
     fixture = FixtureListingSourceAdapter()
     rows: list[dict[str, Any]] = []
 
@@ -228,13 +378,14 @@ def load_ending_auction_rows(window_hours: int) -> list[dict[str, Any]]:
             _collect_with_retries(
                 fetch_fn=lambda: yahoo.get_ending_auctions(
                     window_start=now,
-                    window_end=now + timedelta(hours=max(1, window_hours)),
+                    window_end=window_end,
                     category="fountain_pen",
                 ),
                 attempts=settings.ingestion_retry_attempts,
                 backoff_seconds=settings.ingestion_retry_backoff_seconds,
                 min_completeness=settings.ingestion_parse_min_completeness,
                 min_valid_rows=0,
+                source_label="yahoo_auctions:ending_refresh",
             )
         )
 
@@ -242,13 +393,14 @@ def load_ending_auction_rows(window_hours: int) -> list[dict[str, Any]]:
         rows.extend(
             fixture.get_ending_auctions(
                 window_start=now,
-                window_end=now + timedelta(hours=max(1, window_hours)),
+                window_end=window_end,
                 category="fountain_pen",
                 source_filter="yahoo_auctions",
             )
         )
 
-    return _dedupe_rows(rows)
+    deduped = _dedupe_rows(rows)
+    return _filter_known_ending_rows(deduped, window_start=now, window_end=window_end)
 
 
 def upsert_raw_listing(session: Session, payload: dict[str, Any]) -> RawListing:
@@ -273,7 +425,10 @@ def upsert_raw_listing(session: Session, payload: dict[str, Any]) -> RawListing:
     existing.seller_rating = payload.get("seller_rating")
     existing.listing_format = payload.get("listing_format") or payload.get("listing_type") or "buy_now"
     existing.current_price_jpy = int(payload.get("current_price_jpy") or 0)
-    existing.price_buy_now_jpy = payload.get("price_buy_now_jpy")
+
+    buy_now = payload.get("price_buy_now_jpy")
+    existing.price_buy_now_jpy = int(buy_now) if buy_now not in (None, "") else None
+
     existing.domestic_shipping_jpy = int(payload.get("domestic_shipping_jpy") or 0)
     existing.bid_count = payload.get("bid_count")
     existing.listed_at = _parse_datetime(payload.get("listed_at"))
@@ -358,143 +513,8 @@ def _record_listing_snapshot(session: Session, listing: RawListing) -> None:
     session.flush()
 
 
-BRAND_KEYWORDS = {
-    "Namiki": ["namiki", "ナミキ"],
-    "Pilot": ["pilot", "パイロット"],
-    "Sailor": ["sailor", "セーラー"],
-    "Platinum": ["platinum", "プラチナ"],
-    "Nakaya": ["nakaya", "中屋"],
-    "Pelikan": ["pelikan"],
-    "Montblanc": ["montblanc", "モンブラン"],
-}
-
-
-LINE_HINTS = {
-    "Custom 743": ["743", "custom 743", "カスタム743"],
-    "Custom 823": ["823", "custom 823", "カスタム823"],
-    "1911 Large": ["1911", "1911l", "1911 large"],
-    "3776 Century": ["3776", "century", "センチュリー"],
-    "Yukari": ["yukari", "雪割", "蒔絵"],
-}
-
-
-CONDITION_KEYWORDS = [
-    ("傷", "micro_scratches"),
-    ("スレ", "micro_scratches"),
-    ("scratch", "micro_scratches"),
-    ("凹", "dent_or_ding"),
-    ("dent", "dent_or_ding"),
-    ("メッキ", "plating_wear"),
-    ("錆", "trim_wear"),
-    ("曲が", "bent_nib_possible"),
-    ("割れ", "hairline_crack"),
-    ("ヒビ", "hairline_crack"),
-    ("ジャンク", "parts_repair"),
-    ("repair", "parts_repair"),
-    ("名入れ", "name_engraving"),
-    ("engraving", "name_engraving"),
-    ("漆", "urushi_finish"),
-]
-
-
-def _normalize_identifier(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "_", value.lower())
-    return normalized.strip("_") or "unknown_fountain_pen"
-
-
-def _detect_brand_and_line(text: str) -> tuple[str, str | None]:
-    lower = text.lower()
-
-    detected_brand = "Unknown"
-    for brand, keywords in BRAND_KEYWORDS.items():
-        if any(keyword in lower for keyword in keywords):
-            detected_brand = brand
-            break
-
-    detected_line = None
-    for line, keywords in LINE_HINTS.items():
-        if any(keyword in lower for keyword in keywords):
-            detected_line = line
-            break
-
-    return detected_brand, detected_line
-
-
-def _estimate_item_count(text: str, lot_size_hint: int) -> int:
-    lower = text.lower()
-    match = re.search(r"(\d+)\s*(?:本|pen|pens)", lower)
-    if match:
-        return max(1, int(match.group(1)))
-
-    if "まとめ" in text or "セット" in text or re.search(r"\blot\b", lower):
-        return max(2, lot_size_hint)
-
-    return max(1, lot_size_hint)
-
-
-def _extract_condition_flags(text: str) -> list[str]:
-    lower = text.lower()
-    flags = [flag for keyword, flag in CONDITION_KEYWORDS if keyword in lower]
-    deduped: list[str] = []
-    for flag in flags:
-        if flag not in deduped:
-            deduped.append(flag)
-    return deduped
-
-
 def classify_listing(listing: RawListing) -> dict[str, Any]:
-    text_blob = " ".join(
-        part for part in [listing.title, listing.description_raw or "", listing.condition_text or ""] if part
-    )
-    brand, line = _detect_brand_and_line(text_blob)
-    item_count = _estimate_item_count(text_blob, listing.lot_size_hint)
-    condition_flags = _extract_condition_flags(text_blob)
-
-    if "parts_repair" in condition_flags:
-        condition_grade = "Parts/Repair"
-    elif any(flag in condition_flags for flag in ["hairline_crack", "bent_nib_possible"]):
-        condition_grade = "C"
-    elif any(token in text_blob for token in ["目立った傷や汚れなし", "美品", "good condition"]):
-        condition_grade = "B+"
-    else:
-        condition_grade = "B"
-
-    base_conf = 0.82 if brand != "Unknown" else 0.48
-    classification_confidence = max(0.35, min(0.95, base_conf - (0.07 if item_count > 1 else 0.0)))
-    condition_confidence = 0.75 if condition_flags or listing.condition_text else 0.45
-    lot_decomposition_confidence = 0.9 if item_count == 1 else 0.62
-
-    class_parts = [brand, line or "fountain_pen"]
-    classification_id = _normalize_identifier("_".join(class_parts))
-
-    items = []
-    for idx in range(item_count):
-        items.append(
-            {
-                "item_index": idx,
-                "classification_id": classification_id,
-                "condition_grade": condition_grade,
-                "condition_flags": condition_flags,
-                "visibility_confidence": max(0.3, lot_decomposition_confidence - (idx * 0.03)),
-            }
-        )
-
-    return {
-        "classification_id": classification_id,
-        "brand": brand,
-        "line": line,
-        "nib_material": None,
-        "nib_size": None,
-        "condition_grade": condition_grade,
-        "condition_flags": condition_flags,
-        "item_count_estimate": item_count,
-        "items": items,
-        "classification_confidence": round(classification_confidence, 3),
-        "condition_confidence": round(condition_confidence, 3),
-        "lot_decomposition_confidence": round(lot_decomposition_confidence, 3),
-        "text_evidence": text_blob[:600],
-        "image_evidence": None,
-    }
+    return classify_listing_multi_stage(listing)
 
 
 def _upsert_classification(
@@ -572,18 +592,39 @@ def _upsert_auction(
     return row
 
 
+def _dedupe_flags(flags: list[str]) -> list[str]:
+    deduped: list[str] = []
+    for flag in flags:
+        if flag not in deduped:
+            deduped.append(flag)
+    return deduped
+
+
+def _zero_valuation_payload() -> dict[str, Any]:
+    return {
+        "resale_pred_jpy": 0,
+        "resale_ci_low_jpy": 0,
+        "resale_ci_high_jpy": 0,
+        "valuation_confidence": 0.0,
+    }
+
+
 def compute_score(
     listing: RawListing,
     classification_payload: dict[str, Any],
     valuation_payload: dict[str, Any],
     auction_payload: dict[str, Any] | None,
     proxy_payloads: list[dict[str, Any]],
+    price_status: str,
 ) -> dict[str, Any]:
     settings = get_settings()
 
-    best_proxy = next((opt for opt in proxy_payloads if opt["is_recommended"]), proxy_payloads[0])
-    expected_profit = int(best_proxy["expected_profit_jpy"])
-    expected_profit_pct = float(best_proxy["expected_profit_pct"])
+    best_proxy = next((opt for opt in proxy_payloads if opt["is_recommended"]), None)
+    if best_proxy is None and proxy_payloads:
+        best_proxy = proxy_payloads[0]
+
+    expected_profit = int(best_proxy["expected_profit_jpy"]) if best_proxy else 0
+    expected_profit_pct = float(best_proxy["expected_profit_pct"]) if best_proxy else 0.0
 
     images = _from_json(listing.images_json, [])
     listing_quality_conf = 0.35
@@ -598,7 +639,7 @@ def compute_score(
     listing_quality_conf = min(1.0, listing_quality_conf)
 
     auction_conf = auction_payload["auction_confidence"] if auction_payload else 0.7
-    coupon_conf = best_proxy["cost_confidence"]
+    coupon_conf = float(best_proxy["cost_confidence"]) if best_proxy else 0.65
 
     confidence_overall = (
         0.25 * classification_payload["classification_confidence"]
@@ -612,12 +653,39 @@ def compute_score(
     confidence_overall = round(max(0.0, min(1.0, confidence_overall)), 3)
 
     risk_flags = list(classification_payload["condition_flags"])
+    risk_flags.extend(classification_payload.get("uncertainty_tags", []))
     if classification_payload["brand"] == "Unknown":
         risk_flags.append("brand_uncertain")
     if classification_payload["item_count_estimate"] > 1:
         risk_flags.append("lot_uncertainty")
     if classification_payload["classification_confidence"] < 0.55:
         risk_flags.append("model_ambiguity")
+
+    if price_status == "missing":
+        risk_flags.append("price_missing")
+        risk_flags = _dedupe_flags(risk_flags)
+        return {
+            "expected_profit_jpy": 0,
+            "expected_profit_pct": 0.0,
+            "risk_adjusted_profit_jpy": 0,
+            "confidence_overall": round(min(confidence_overall, 0.2), 3),
+            "bucket": "discard",
+            "risk_flags": risk_flags,
+            "rationale": "Listing discarded because no valid price was found.",
+        }
+
+    if price_status == "parse_error":
+        risk_flags.extend(["price_parse_error", "needs_manual_price_review"])
+        risk_flags = _dedupe_flags(risk_flags)
+        return {
+            "expected_profit_jpy": 0,
+            "expected_profit_pct": 0.0,
+            "risk_adjusted_profit_jpy": 0,
+            "confidence_overall": round(min(confidence_overall, 0.35), 3),
+            "bucket": "potential",
+            "risk_flags": risk_flags,
+            "rationale": "Price parsing failed; held for manual review with neutralized profit.",
+        }
 
     major_flags = {"hairline_crack", "bent_nib_possible", "possible_fake", "parts_repair"}
     has_major_risk = any(flag in major_flags for flag in risk_flags)
@@ -637,11 +705,14 @@ def compute_score(
         bucket = "discard"
 
     risk_adjusted_profit = int(expected_profit * confidence_overall)
+    proxy_name = best_proxy["proxy_name"] if best_proxy else "None"
+    proxy_total = int(best_proxy["total_cost_jpy"]) if best_proxy else 0
+    proxy_profit = int(best_proxy["expected_profit_jpy"]) if best_proxy else 0
     rationale = (
         f"{classification_payload['brand']} {classification_payload['line'] or 'fountain pen'} "
         f"estimated resale {valuation_payload['resale_pred_jpy']} JPY, "
-        f"best proxy {best_proxy['proxy_name']} at {best_proxy['total_cost_jpy']} JPY "
-        f"(expected proxy profit {best_proxy['expected_profit_jpy']} JPY)."
+        f"best proxy {proxy_name} at {proxy_total} JPY "
+        f"(expected proxy profit {proxy_profit} JPY)."
     )
 
     return {
@@ -650,7 +721,7 @@ def compute_score(
         "risk_adjusted_profit_jpy": int(risk_adjusted_profit),
         "confidence_overall": confidence_overall,
         "bucket": bucket,
-        "risk_flags": risk_flags,
+        "risk_flags": _dedupe_flags(risk_flags),
         "rationale": rationale,
     }
 
@@ -677,14 +748,27 @@ def _upsert_deal_score(
     return row
 
 
+def _listing_price_status(listing: RawListing) -> str:
+    return derive_price_status(
+        listing.current_price_jpy,
+        listing.price_buy_now_jpy,
+        listing.raw_attributes_json,
+    )
+
+
 def score_single_listing(session: Session, listing: RawListing) -> dict[str, Any]:
+    price_status = _listing_price_status(listing)
+
     classification_payload = classify_listing(listing)
     classification_row = _upsert_classification(session, listing.listing_id, classification_payload)
 
-    valuation_payload = predict_resale_value(listing, classification_payload)
+    if price_status == "valid":
+        valuation_payload = predict_resale_value(listing, classification_payload)
+    else:
+        valuation_payload = _zero_valuation_payload()
     valuation_row = _upsert_valuation(session, listing.listing_id, valuation_payload)
 
-    auction_payload = predict_auction_value(listing, valuation_payload)
+    auction_payload = predict_auction_value(listing, valuation_payload) if price_status == "valid" else None
     auction_row = _upsert_auction(session, listing.listing_id, auction_payload)
 
     buy_price_for_proxy = (
@@ -692,11 +776,15 @@ def score_single_listing(session: Session, listing: RawListing) -> dict[str, Any
         if auction_payload
         else (listing.price_buy_now_jpy or listing.current_price_jpy)
     )
+    resale_reference = int(valuation_payload["resale_pred_jpy"])
+    if price_status != "valid":
+        resale_reference = 0
+
     proxy_payloads = estimate_proxy_deals(
         session,
         listing,
         buy_price_jpy=int(buy_price_for_proxy or 0),
-        resale_reference_jpy=int(valuation_payload["resale_pred_jpy"]),
+        resale_reference_jpy=resale_reference,
     )
     proxy_rows = upsert_proxy_deals(session, listing.listing_id, proxy_payloads)
 
@@ -706,6 +794,7 @@ def score_single_listing(session: Session, listing: RawListing) -> dict[str, Any
         valuation_payload,
         auction_payload,
         proxy_payloads,
+        price_status=price_status,
     )
     deal_row = _upsert_deal_score(session, listing.listing_id, score_payload)
 
@@ -725,8 +814,15 @@ def run_collection_pipeline(session: Session, report_date: date | None = None) -
     scored_count = 0
     source_counts: dict[str, int] = {}
     for payload in source_rows:
-        listing = upsert_raw_listing(session, payload)
+        prepared_payload = _prepare_listing_payload(payload)
+        listing = upsert_raw_listing(session, prepared_payload)
         artifacts = score_single_listing(session, listing)
+        capture_listing_assets(
+            session,
+            listing,
+            deal_bucket=artifacts["deal_score"].bucket,
+            source_payload=prepared_payload,
+        )
         ingested_count += 1
         source_counts[listing.source] = source_counts.get(listing.source, 0) + 1
         if artifacts["deal_score"].bucket != "discard":
@@ -736,7 +832,9 @@ def run_collection_pipeline(session: Session, report_date: date | None = None) -
 
     from .reporting import generate_daily_report
 
-    target_date = report_date or datetime.now(timezone.utc).date()
+    settings = get_settings()
+    default_tz = get_default_timezone(settings.default_timezone)
+    target_date = report_date or datetime.now(default_tz).date()
     report = generate_daily_report(session, target_date)
 
     return {
@@ -758,8 +856,15 @@ def run_ending_auction_refresh(
     ingested_count = 0
     scored_count = 0
     for payload in source_rows:
-        listing = upsert_raw_listing(session, payload)
+        prepared_payload = _prepare_listing_payload(payload)
+        listing = upsert_raw_listing(session, prepared_payload)
         artifacts = score_single_listing(session, listing)
+        capture_listing_assets(
+            session,
+            listing,
+            deal_bucket=artifacts["deal_score"].bucket,
+            source_payload=prepared_payload,
+        )
         ingested_count += 1
         if artifacts["deal_score"].bucket != "discard":
             scored_count += 1
@@ -769,6 +874,125 @@ def run_ending_auction_refresh(
         "ingested_count": ingested_count,
         "scored_count": scored_count,
         "window_hours": window_hours,
+    }
+
+
+def _priority_score_for_listing(
+    listing: RawListing,
+    deal_score: DealScore,
+    *,
+    now: datetime,
+    window_hours: int,
+) -> float:
+    ends_at = to_utc(listing.ends_at)
+    if ends_at is None:
+        return 0.0
+
+    horizon_seconds = max(1.0, float(window_hours) * 3600.0)
+    seconds_to_end = max(0.0, (ends_at - now).total_seconds())
+    urgency = max(0.0, min(1.0, 1.0 - (seconds_to_end / horizon_seconds)))
+
+    underpricing_signal = max(0.0, min(1.0, float(deal_score.expected_profit_pct)))
+    confidence_signal = max(0.0, min(1.0, float(deal_score.confidence_overall)))
+
+    return round((0.5 * underpricing_signal) + (0.3 * confidence_signal) + (0.2 * urgency), 4)
+
+
+def select_priority_auction_candidates(
+    session: Session,
+    *,
+    window_hours: int,
+    threshold: float,
+    limit: int = 100,
+) -> list[tuple[RawListing, float]]:
+    now = datetime.now(timezone.utc)
+    window_end = now + timedelta(hours=max(1, window_hours))
+
+    rows = session.execute(
+        select(RawListing, DealScore)
+        .join(DealScore, DealScore.listing_id == RawListing.listing_id)
+        .where(
+            RawListing.listing_format == "auction",
+            RawListing.ends_at.is_not(None),
+            RawListing.ends_at >= now,
+            RawListing.ends_at < window_end,
+        )
+        .order_by(RawListing.ends_at.asc())
+    ).all()
+
+    scored: list[tuple[RawListing, float]] = []
+    for listing, deal_score in rows:
+        score = _priority_score_for_listing(
+            listing,
+            deal_score,
+            now=now,
+            window_hours=max(1, window_hours),
+        )
+        if score >= threshold:
+            scored.append((listing, score))
+
+    scored.sort(
+        key=lambda item: (
+            item[1],
+            to_utc(item[0].ends_at) or datetime.max.replace(tzinfo=timezone.utc),
+        ),
+        reverse=True,
+    )
+    return scored[: max(1, limit)]
+
+
+def run_priority_auction_refresh(
+    session: Session,
+    *,
+    window_hours: int,
+    threshold: float,
+    limit: int = 100,
+) -> dict[str, Any]:
+    candidates = select_priority_auction_candidates(
+        session,
+        window_hours=window_hours,
+        threshold=threshold,
+        limit=limit,
+    )
+
+    ingested_count = 0
+    scored_count = 0
+    for listing, _score in candidates:
+        factory = SOURCE_ADAPTER_FACTORIES.get(listing.source)
+        if factory is None:
+            continue
+        adapter = factory()
+
+        try:
+            payload = adapter.fetch_listing_detail(listing.source_listing_id)
+        except Exception:
+            record_ingestion_failure(f"{listing.source}:priority_detail_fetch_exception")
+            continue
+        if not payload:
+            record_ingestion_failure(f"{listing.source}:priority_detail_missing")
+            continue
+
+        prepared_payload = _prepare_listing_payload(payload)
+        updated_listing = upsert_raw_listing(session, prepared_payload)
+        artifacts = score_single_listing(session, updated_listing)
+        capture_listing_assets(
+            session,
+            updated_listing,
+            deal_bucket=artifacts["deal_score"].bucket,
+            source_payload=prepared_payload,
+        )
+
+        ingested_count += 1
+        if artifacts["deal_score"].bucket != "discard":
+            scored_count += 1
+
+    session.commit()
+    return {
+        "candidate_count": len(candidates),
+        "ingested_count": ingested_count,
+        "scored_count": scored_count,
+        "window_hours": max(1, window_hours),
+        "threshold": float(threshold),
     }
 
 

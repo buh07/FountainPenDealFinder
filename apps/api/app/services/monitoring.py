@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from ..core.config import get_settings
 from ..models import DealScore, ManualReview, RawListing
 from ..schemas import HealthMetricsResponse
+from .model_registry import get_active_model_version
+from .ops_telemetry import get_operational_failure_snapshot
 
 
 def _repo_root() -> Path:
@@ -43,6 +45,21 @@ def _read_baseline_eval_pass() -> bool | None:
         return None
     value = gates.get("overall_pass")
     return bool(value) if isinstance(value, bool) else None
+
+
+def _model_age_hours(task: str, now: datetime) -> tuple[str | None, float | None]:
+    active = get_active_model_version(task)  # type: ignore[arg-type]
+    if not isinstance(active, dict):
+        return None, None
+
+    version_id = str(active.get("version_id") or "") or None
+    created_at = active.get("created_at")
+    if not isinstance(created_at, datetime):
+        return version_id, None
+
+    created_at_utc = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+    age_hours = max(0.0, (now - created_at_utc.astimezone(timezone.utc)).total_seconds() / 3600.0)
+    return version_id, round(age_hours, 3)
 
 
 def build_health_metrics(session: Session, window_hours: int) -> HealthMetricsResponse:
@@ -86,6 +103,7 @@ def build_health_metrics(session: Session, window_hours: int) -> HealthMetricsRe
         false_positive_rate = fp_count / manual_review_count
 
     baseline_eval_pass = _read_baseline_eval_pass()
+    failure_snapshot = get_operational_failure_snapshot()
 
     alerts: list[str] = []
 
@@ -114,6 +132,15 @@ def build_health_metrics(session: Session, window_hours: int) -> HealthMetricsRe
     if baseline_eval_pass is False:
         alerts.append("baseline_eval_failed")
 
+    active_model_versions: dict[str, str | None] = {}
+    model_age_hours: dict[str, float | None] = {}
+    for task in ("resale", "auction"):
+        version_id, age_hours = _model_age_hours(task, now)
+        active_model_versions[task] = version_id
+        model_age_hours[task] = age_hours
+        if age_hours is not None and age_hours > settings.monitoring_max_model_age_hours:
+            alerts.append(f"model_stale:{task}")
+
     return HealthMetricsResponse(
         generated_at=now,
         window_hours=max(1, window_hours),
@@ -124,5 +151,19 @@ def build_health_metrics(session: Session, window_hours: int) -> HealthMetricsRe
         manual_review_count=manual_review_count,
         false_positive_rate=(round(false_positive_rate, 4) if false_positive_rate is not None else None),
         baseline_eval_pass=baseline_eval_pass,
+        ingestion_failure_count=int(failure_snapshot.get("ingestion_failure_count") or 0),
+        latest_ingestion_failure_reason=(
+            str(failure_snapshot["latest_ingestion_failure_reason"])
+            if failure_snapshot.get("latest_ingestion_failure_reason")
+            else None
+        ),
+        retrain_failure_count=int(failure_snapshot.get("retrain_failure_count") or 0),
+        latest_retrain_failure_reason=(
+            str(failure_snapshot["latest_retrain_failure_reason"])
+            if failure_snapshot.get("latest_retrain_failure_reason")
+            else None
+        ),
+        active_model_versions=active_model_versions,
+        model_age_hours=model_age_hours,
         alerts=alerts,
     )

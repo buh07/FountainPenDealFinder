@@ -1,9 +1,9 @@
-source,brand,line,condition_grade,ask_price_jpy,sold_price_jpy,item_count,sold_at
-r_pen_swap,Pilot,Custom 743,B+,42000,76000,1,2026-02-04T12:00:00Z
-r_pen_swap,Pilot,Custom 823,B,39000,64000,1,2026-02-11T12:00:00Z
-r_pen_swap,Sailor,1911 Large,B,25000,42000,1,2026-02-13T12:00:00Z
-r_pen_swap,Platinum,3776 Century,B+,19000,31000,1,2026-02-15T12:00:00Z
-r_pen_swap,Namiki,Yukari,B,85000,142000,1,2026-02-22T12:00:00Z
-r_pen_swap,Montblanc,146,C,52000,72000,1,2026-02-25T12:00:00Z
-r_pen_swap,Pelikan,M800,B,47000,78000,1,2026-03-02T12:00:00Z
-r_pen_swap,Unknown,Lot,Parts/Repair,15000,17000,2,2026-03-05T12:00:00Z
+source,category,classification_id,brand,line,condition_grade,ask_price_jpy,sold_price_jpy,item_count,sold_at
+r_pen_swap,japanese_core,pilot_custom_743,Pilot,Custom 743,B+,42000,76000,1,2026-02-04T12:00:00Z
+r_pen_swap,japanese_core,pilot_custom_823,Pilot,Custom 823,B,39000,64000,1,2026-02-11T12:00:00Z
+r_pen_swap,japanese_core,sailor_1911_large,Sailor,1911 Large,B,25000,42000,1,2026-02-13T12:00:00Z
+r_pen_swap,japanese_core,platinum_3776_century,Platinum,3776 Century,B+,19000,31000,1,2026-02-15T12:00:00Z
+r_pen_swap,japanese_premium,namiki_yukari,Namiki,Yukari,B,85000,142000,1,2026-02-22T12:00:00Z
+r_pen_swap,european_luxury,montblanc_146,Montblanc,146,C,52000,72000,1,2026-02-25T12:00:00Z
+r_pen_swap,european_luxury,pelikan_m800,Pelikan,M800,B,47000,78000,1,2026-03-02T12:00:00Z
+r_pen_swap,other,unknown_lot,Unknown,Lot,Parts/Repair,15000,17000,2,2026-03-05T12:00:00Z

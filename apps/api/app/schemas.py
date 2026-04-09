@@ -6,9 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 DealBucket = Literal["confident", "potential", "discard"]
 ListingType = Literal["auction", "buy_now"]
+PriceStatus = Literal["valid", "missing", "parse_error"]
+ModelTask = Literal["resale", "auction"]
 ReviewAction = Literal[
     "confirm_classification",
     "correct_classification",
+    "add_new_type",
     "mark_fake_suspicious",
     "mark_condition_worse",
     "mark_purchased",
@@ -38,6 +41,7 @@ class ListingSummary(BaseModel):
     listing_url: str
     seller_id: str | None = None
     listing_type: ListingType
+    price_status: PriceStatus = "valid"
     current_price_jpy: int = Field(ge=0)
     estimated_total_buy_cost_jpy: int = Field(ge=0)
     estimated_resale_price_jpy: int = Field(ge=0)
@@ -48,6 +52,7 @@ class ListingSummary(BaseModel):
     auction_expected_final_price_jpy: int | None = None
     recommended_proxy: str = "None"
     deal_bucket: DealBucket
+    risk_flags: list[str] = Field(default_factory=list)
     listed_at: datetime | None = None
     time_remaining: str | None = None
     rationale: str
@@ -79,6 +84,16 @@ class EndingAuctionRefreshResponse(BaseModel):
     ingested_count: int
     scored_count: int
     window_hours: int
+
+
+class PriorityAuctionRefreshResponse(BaseModel):
+    started_at: datetime
+    finished_at: datetime
+    candidate_count: int
+    ingested_count: int
+    scored_count: int
+    window_hours: int
+    threshold: float
 
 
 class DailyReportResponse(BaseModel):
@@ -132,7 +147,13 @@ class ProxyTopDealsResponse(BaseModel):
 class ManualReviewRequest(BaseModel):
     action_type: ReviewAction
     corrected_classification_id: str | None = None
+    corrected_brand: str | None = None
+    corrected_line: str | None = None
     corrected_condition_grade: str | None = None
+    corrected_item_count: int | None = Field(default=None, ge=1)
+    corrected_ask_price_jpy: int | None = Field(default=None, ge=0)
+    corrected_sold_price_jpy: int | None = Field(default=None, ge=0)
+    taxonomy_aliases: list[str] = Field(default_factory=list)
     is_false_positive: bool = False
     was_purchased: bool = False
     notes: str = ""
@@ -154,6 +175,36 @@ class RetrainJobResponse(BaseModel):
     details: str
 
 
+class ModelVersionInfo(BaseModel):
+    task: ModelTask
+    version_id: str
+    artifact_path: str
+    created_at: datetime
+    is_active: bool = False
+
+
+class ActiveModelVersionResponse(BaseModel):
+    task: ModelTask
+    active: ModelVersionInfo | None = None
+    fallback_artifact_path: str
+
+
+class ModelVersionListResponse(BaseModel):
+    task: ModelTask
+    active_version_id: str | None = None
+    versions: list[ModelVersionInfo] = Field(default_factory=list)
+
+
+class ModelRollbackRequest(BaseModel):
+    version_id: str
+
+
+class ModelRollbackResponse(BaseModel):
+    task: ModelTask
+    previous_version_id: str | None = None
+    active: ModelVersionInfo | None = None
+
+
 class HealthMetricsResponse(BaseModel):
     generated_at: datetime
     window_hours: int
@@ -164,6 +215,12 @@ class HealthMetricsResponse(BaseModel):
     manual_review_count: int
     false_positive_rate: float | None = None
     baseline_eval_pass: bool | None = None
+    ingestion_failure_count: int = 0
+    latest_ingestion_failure_reason: str | None = None
+    retrain_failure_count: int = 0
+    latest_retrain_failure_reason: str | None = None
+    active_model_versions: dict[str, str | None] = Field(default_factory=dict)
+    model_age_hours: dict[str, float | None] = Field(default_factory=dict)
     alerts: list[str] = Field(default_factory=list)
 
 
@@ -173,3 +230,19 @@ class HealthAlertDispatchResponse(BaseModel):
     alert_count: int
     destination: str | None = None
     status_code: int | None = None
+    deduped: bool = False
+    cooldown_remaining_seconds: int | None = None
+    alert_signature: str | None = None
+
+
+class TaxonomyTypeEntry(BaseModel):
+    brand: str
+    line: str
+    category: str
+    aliases: list[str] = Field(default_factory=list)
+
+
+class TaxonomyStandardResponse(BaseModel):
+    categories: dict[str, list[str]] = Field(default_factory=dict)
+    conditions: list[str] = Field(default_factory=list)
+    types: list[TaxonomyTypeEntry] = Field(default_factory=list)

@@ -1,0 +1,8 @@
+{
+  "input": "/Users/benjaminhuh/Documents/Dartmouth/Project/FountainPenDealFinder/data/labeled/review/scraped_sales_all_20260416.csv",
+  "decisions": {
+    "1": "keep",
+    "2": "keep",
+    "6": "keep"
+  }
+}

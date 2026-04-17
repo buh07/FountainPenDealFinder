@@ -1,9 +1,16 @@
 {
-  "generated_at": "2026-04-09T23:28:29.200471+00:00",
+  "generated_at": "2026-04-11T21:05:57.720486+00:00",
   "gates": {
     "overall_pass": true,
     "resale_pass": true,
     "auction_pass": true,
+    "resale_threshold_pass": true,
+    "auction_threshold_pass": true,
+    "resale_holdout_ok": true,
+    "auction_holdout_ok": true,
+    "resale_significance_pass": true,
+    "auction_significance_pass": true,
+    "require_holdout": false,
     "min_rows": 5,
     "resale_max_mape": 0.5,
     "auction_max_mape": 0.4
@@ -11,13 +18,13 @@
   "metrics": {
     "resale": {
       "rows": 8,
-      "mape": 0.0639,
-      "wape": 0.0428,
-      "p95_ape": 0.1538,
+      "mape": 0.0334,
+      "wape": 0.0189,
+      "p95_ape": 0.0545,
       "by_brand": {
         "Montblanc": {
           "rows": 1,
-          "mape": 0.1538
+          "mape": 0.0
         },
         "Namiki": {
           "rows": 1,
@@ -29,19 +36,19 @@
         },
         "Pilot": {
           "rows": 2,
-          "mape": 0.0347
+          "mape": 0.0305
         },
         "Platinum": {
           "rows": 1,
-          "mape": 0.0515
+          "mape": 0.0545
         },
         "Sailor": {
           "rows": 1,
-          "mape": 0.0148
+          "mape": 0.0116
         },
         "Unknown": {
           "rows": 1,
-          "mape": 0.2151
+          "mape": 0.1333
         }
       }
     },
@@ -64,6 +71,18 @@
           "mape": 0.0
         }
       }
+    }
+  },
+  "significance": {
+    "resale": {
+      "applicable": false,
+      "pass": null,
+      "reason": "non_holdout_eval_mode"
+    },
+    "auction": {
+      "applicable": false,
+      "pass": null,
+      "reason": "non_holdout_eval_mode"
     }
   },
   "split": {

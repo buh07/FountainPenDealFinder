@@ -1,5 +1,8 @@
 import logging
+import math
+from collections.abc import Iterable
 from datetime import datetime, timezone
+import json
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,6 +12,13 @@ from ..models import CouponRule, ProxyOptionEstimate, ProxyPricingPolicy, RawLis
 
 
 logger = logging.getLogger(__name__)
+
+PROXY_MARKETPLACE_COMPATIBILITY: dict[str, set[str]] = {
+    "Buyee": {"yahoo_auctions", "yahoo_flea_market", "mercari", "rakuma"},
+    "FromJapan": {"yahoo_auctions", "yahoo_flea_market", "mercari", "rakuma"},
+    "Neokyo": {"yahoo_auctions", "mercari", "rakuma"},
+    "None": {"yahoo_auctions", "yahoo_flea_market", "mercari", "rakuma"},
+}
 
 
 DEFAULT_PROXY_POLICIES = [
@@ -147,6 +157,53 @@ def _is_active_now(starts_at: datetime | None, ends_at: datetime | None, now: da
     return True
 
 
+def _is_proxy_compatible(proxy_name: str, marketplace_source: str) -> bool:
+    allowed_sources = PROXY_MARKETPLACE_COMPATIBILITY.get(proxy_name)
+    if not allowed_sources:
+        return True
+    return marketplace_source in allowed_sources
+
+
+def _listing_raw_attributes(listing: RawListing) -> dict:
+    raw = str(listing.raw_attributes_json or "").strip()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _first_time_proxy_names(listing: RawListing) -> set[str]:
+    raw_attributes = _listing_raw_attributes(listing)
+    marker = raw_attributes.get("proxy_first_time_user")
+
+    if marker is True:
+        return {"*"}
+    if marker is False or marker is None:
+        return set()
+    if isinstance(marker, str):
+        candidates = [part.strip() for part in marker.split(",") if part.strip()]
+        return {value.lower() for value in candidates}
+    if isinstance(marker, Iterable):
+        names: set[str] = set()
+        for value in marker:
+            normalized = str(value or "").strip().lower()
+            if normalized:
+                names.add(normalized)
+        return names
+    return set()
+
+
+def _first_time_penalty_for_proxy(listing: RawListing, proxy_name: str) -> int:
+    settings = get_settings()
+    marker = _first_time_proxy_names(listing)
+    if "*" in marker or proxy_name.lower() in marker:
+        return max(0, int(settings.proxy_first_time_user_penalty_jpy))
+    return 0
+
+
 def _apply_coupon_discount(
     rule: CouponRule,
     buy_price_jpy: int,
@@ -273,6 +330,8 @@ def estimate_proxy_deals(
     ).all()
     policies: dict[str, ProxyPricingPolicy] = {}
     for row in policy_rows:
+        if not _is_proxy_compatible(row.proxy_name, listing.source):
+            continue
         if row.marketplace_source and row.marketplace_source != listing.source:
             continue
         if buy_price_jpy < int(row.min_buy_price_jpy or 0):
@@ -305,12 +364,14 @@ def estimate_proxy_deals(
             service_fee_jpy=int(policy.service_fee_jpy),
         )
 
+        first_time_penalty = _first_time_penalty_for_proxy(listing, proxy_name)
         total_cost = max(
             0,
             buy_price_jpy
             + domestic_shipping
             + int(policy.service_fee_jpy)
             + int(policy.intl_shipping_jpy)
+            + first_time_penalty
             - coupon_discount,
         )
 
@@ -320,6 +381,10 @@ def estimate_proxy_deals(
         if coupon_id:
             coupon_count = len(coupon_id.split("+"))
             cost_confidence = max(0.55, 0.72 - (coupon_count * 0.03))
+        if first_time_penalty > 0:
+            cost_confidence = max(0.5, cost_confidence - 0.05)
+
+        risk_adjusted_total_cost = int(math.ceil(total_cost / max(cost_confidence, 0.45)))
 
         payloads.append(
             {
@@ -331,7 +396,12 @@ def estimate_proxy_deals(
                 "coupon_id": coupon_id,
                 "coupon_discount_jpy": int(coupon_discount),
                 "cost_confidence": round(cost_confidence, 3),
+                "risk_adjusted_total_cost_jpy": int(risk_adjusted_total_cost),
+                "first_time_penalty_jpy": int(first_time_penalty),
+                "compatible_with_marketplace": True,
+                "compatibility_note": None,
                 "is_recommended": False,
+                "is_recommended_risk_adjusted": False,
                 "arbitrage_rank": None,
             }
         )
@@ -352,7 +422,14 @@ def estimate_proxy_deals(
                 "coupon_id": None,
                 "coupon_discount_jpy": 0,
                 "cost_confidence": 0.65,
+                "risk_adjusted_total_cost_jpy": int(
+                    math.ceil(max(0, buy_price_jpy + domestic_shipping) / 0.65)
+                ),
+                "first_time_penalty_jpy": 0,
+                "compatible_with_marketplace": True,
+                "compatibility_note": None,
                 "is_recommended": False,
+                "is_recommended_risk_adjusted": False,
                 "arbitrage_rank": None,
             }
         )
@@ -370,6 +447,15 @@ def estimate_proxy_deals(
         item["arbitrage_rank"] = idx
     if payloads:
         payloads[0]["is_recommended"] = True
+        best_risk = min(
+            payloads,
+            key=lambda item: (
+                int(item["risk_adjusted_total_cost_jpy"]),
+                -int(item["expected_profit_jpy"]),
+                str(item["proxy_name"]),
+            ),
+        )
+        best_risk["is_recommended_risk_adjusted"] = True
 
     return payloads
 
@@ -434,3 +520,22 @@ def get_top_proxy_deals(
         stmt = stmt.where(ProxyOptionEstimate.proxy_name == proxy_name)
 
     return list(session.execute(stmt).all())
+
+
+def proxy_option_diagnostics(listing: RawListing, row: ProxyOptionEstimate) -> dict:
+    compatible = _is_proxy_compatible(row.proxy_name, listing.source)
+    first_time_penalty = _first_time_penalty_for_proxy(listing, row.proxy_name)
+    adjusted_total = int(max(0, int(row.total_cost_jpy) + int(first_time_penalty)))
+    confidence = max(0.45, float(row.cost_confidence or 0.0))
+    risk_adjusted_total_cost = int(math.ceil(adjusted_total / confidence))
+
+    return {
+        "compatible_with_marketplace": bool(compatible),
+        "compatibility_note": (
+            None
+            if compatible
+            else f"{row.proxy_name} is not configured for source={listing.source}"
+        ),
+        "first_time_penalty_jpy": int(first_time_penalty),
+        "risk_adjusted_total_cost_jpy": int(risk_adjusted_total_cost),
+    }

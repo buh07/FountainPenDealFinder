@@ -2,9 +2,12 @@ import json
 from datetime import date, datetime, timezone
 from uuid import uuid4
 
+from fastapi.testclient import TestClient
+
 from app.adapters.fixture_source import FixtureListingSourceAdapter
 from app.adapters.mercari import MercariAdapter
 from app.db import SessionLocal, init_db
+from app.main import app
 from app.models import (
     AuctionPrediction,
     ClassificationResult,
@@ -15,6 +18,8 @@ from app.models import (
 )
 from app.services.pipeline import _prepare_listing_payload, score_single_listing, upsert_raw_listing
 from app.services.reporting import get_listing_summary, list_ranked_listings
+
+client = TestClient(app)
 
 
 def _seed_scored_listing(
@@ -386,3 +391,50 @@ def test_list_ranked_listings_supports_offset_pagination():
         assert len(page_1) == 1
         assert len(page_2) == 1
         assert page_1[0].listing_id != page_2[0].listing_id
+
+
+def test_daily_report_endpoint_supports_sort_views():
+    init_db()
+    report_date = date(2026, 4, 8)
+    with SessionLocal() as session:
+        high_flat = _seed_scored_listing(
+            session,
+            listing_format="buy_now",
+            listed_at=datetime(2026, 4, 8, 1, 0, tzinfo=timezone.utc),
+            ends_at=None,
+            title="High Flat",
+            bucket="potential",
+        )
+        high_pct = _seed_scored_listing(
+            session,
+            listing_format="buy_now",
+            listed_at=datetime(2026, 4, 8, 2, 0, tzinfo=timezone.utc),
+            ends_at=None,
+            title="High Percent",
+            bucket="potential",
+        )
+
+        rows = session.query(DealScore).filter(DealScore.listing_id.in_([high_flat, high_pct])).all()
+        for row in rows:
+            if row.listing_id == high_flat:
+                row.expected_profit_jpy = 28000
+                row.expected_profit_pct = 0.28
+            else:
+                row.expected_profit_jpy = 12000
+                row.expected_profit_pct = 0.82
+            session.add(row)
+        session.commit()
+
+    flat_resp = client.get(f"/reports/daily/{report_date.isoformat()}?sort_by=flat_profit")
+    assert flat_resp.status_code == 200
+    flat_ids = [item["listing_id"] for item in flat_resp.json()["potential"]]
+    assert high_flat in flat_ids
+    assert high_pct in flat_ids
+    assert flat_ids.index(high_flat) < flat_ids.index(high_pct)
+
+    pct_resp = client.get(f"/reports/daily/{report_date.isoformat()}?sort_by=percent_profit")
+    assert pct_resp.status_code == 200
+    pct_ids = [item["listing_id"] for item in pct_resp.json()["potential"]]
+    assert high_flat in pct_ids
+    assert high_pct in pct_ids
+    assert pct_ids.index(high_pct) < pct_ids.index(high_flat)

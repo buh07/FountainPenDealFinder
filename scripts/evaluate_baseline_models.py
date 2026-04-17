@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate baseline resale/auction artifacts and enforce simple quality gates."""
+"""Evaluate baseline resale/auction artifacts and enforce quality/significance gates."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import argparse
 import csv
 import hashlib
 import json
-import sys
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -74,15 +74,18 @@ def _error_metrics(apes: list[float], abs_errors: list[float], actuals: list[flo
     }
 
 
-def evaluate_resale(rows: list[dict[str, str]], artifact: dict) -> dict:
+def _evaluate_resale_internal(rows: list[dict[str, str]], artifact: dict) -> tuple[dict, list[float]]:
     if not rows or not artifact:
-        return {
-            "rows": 0,
-            "mape": None,
-            "wape": None,
-            "p95_ape": None,
-            "by_brand": {},
-        }
+        return (
+            {
+                "rows": 0,
+                "mape": None,
+                "wape": None,
+                "p95_ape": None,
+                "by_brand": {},
+            },
+            [],
+        )
 
     default_multiplier = float(artifact.get("default_multiplier", 1.3))
     condition_penalties = artifact.get("condition_penalties") or {}
@@ -95,6 +98,7 @@ def evaluate_resale(rows: list[dict[str, str]], artifact: dict) -> dict:
     actuals: list[float] = []
     used = 0
     per_brand: dict[str, list[float]] = {}
+
     for row in rows:
         ask = int(float(row.get("ask_price_jpy") or 0))
         sold = int(float(row.get("sold_price_jpy") or 0))
@@ -123,20 +127,28 @@ def evaluate_resale(rows: list[dict[str, str]], artifact: dict) -> dict:
         used += 1
 
     metrics = _error_metrics(errors, abs_errors, actuals)
-    brand_metrics = {
+    by_brand = {
         brand: {
             "rows": len(values),
             "mape": round(mean(values), 4) if values else None,
         }
         for brand, values in sorted(per_brand.items())
     }
-    return {
-        "rows": used,
-        "mape": metrics["mape"],
-        "wape": metrics["wape"],
-        "p95_ape": metrics["p95_ape"],
-        "by_brand": brand_metrics,
-    }
+    return (
+        {
+            "rows": used,
+            "mape": metrics["mape"],
+            "wape": metrics["wape"],
+            "p95_ape": metrics["p95_ape"],
+            "by_brand": by_brand,
+        },
+        errors,
+    )
+
+
+def evaluate_resale(rows: list[dict[str, str]], artifact: dict) -> dict:
+    metrics, _errors = _evaluate_resale_internal(rows, artifact)
+    return metrics
 
 
 def _bucket_for_bid_count(bid_count: int) -> str:
@@ -149,15 +161,18 @@ def _bucket_for_bid_count(bid_count: int) -> str:
     return "8_plus"
 
 
-def evaluate_auction(rows: list[dict[str, str]], artifact: dict) -> dict:
+def _evaluate_auction_internal(rows: list[dict[str, str]], artifact: dict) -> tuple[dict, list[float]]:
     if not rows or not artifact:
-        return {
-            "rows": 0,
-            "mape": None,
-            "wape": None,
-            "p95_ape": None,
-            "by_bid_bucket": {},
-        }
+        return (
+            {
+                "rows": 0,
+                "mape": None,
+                "wape": None,
+                "p95_ape": None,
+                "by_bid_bucket": {},
+            },
+            [],
+        )
 
     expected_map = artifact.get("bid_bucket_expected_multipliers") or {}
     default_expected = float(artifact.get("default_expected_multiplier", 1.12))
@@ -167,6 +182,7 @@ def evaluate_auction(rows: list[dict[str, str]], artifact: dict) -> dict:
     actuals: list[float] = []
     used = 0
     per_bucket: dict[str, list[float]] = {}
+
     for row in rows:
         current = int(float(row.get("current_price_jpy") or 0))
         final = int(float(row.get("final_price_jpy") or 0))
@@ -187,40 +203,131 @@ def evaluate_auction(rows: list[dict[str, str]], artifact: dict) -> dict:
         used += 1
 
     metrics = _error_metrics(errors, abs_errors, actuals)
-    bucket_metrics = {
+    by_bid_bucket = {
         bucket: {
             "rows": len(values),
             "mape": round(mean(values), 4) if values else None,
         }
         for bucket, values in sorted(per_bucket.items())
     }
+    return (
+        {
+            "rows": used,
+            "mape": metrics["mape"],
+            "wape": metrics["wape"],
+            "p95_ape": metrics["p95_ape"],
+            "by_bid_bucket": by_bid_bucket,
+        },
+        errors,
+    )
+
+
+def evaluate_auction(rows: list[dict[str, str]], artifact: dict) -> dict:
+    metrics, _errors = _evaluate_auction_internal(rows, artifact)
+    return metrics
+
+
+def _bootstrap_ci_mean_delta(
+    deltas: list[float],
+    *,
+    samples: int,
+    alpha: float,
+) -> tuple[float, float]:
+    if not deltas:
+        return 0.0, 0.0
+
+    rng = random.Random(42)
+    n = len(deltas)
+    draws: list[float] = []
+    for _ in range(max(100, samples)):
+        draw = [deltas[rng.randrange(n)] for _ in range(n)]
+        draws.append(mean(draw))
+
+    draws.sort()
+    lower_idx = max(0, int((alpha / 2.0) * len(draws)) - 1)
+    upper_idx = min(len(draws) - 1, int((1.0 - (alpha / 2.0)) * len(draws)) - 1)
+    return float(draws[lower_idx]), float(draws[upper_idx])
+
+
+def _significance_from_errors(
+    *,
+    candidate_errors: list[float],
+    reference_errors: list[float],
+    alpha: float,
+    bootstrap_samples: int,
+) -> dict:
+    usable = min(len(candidate_errors), len(reference_errors))
+    if usable <= 1:
+        return {
+            "applicable": False,
+            "pass": None,
+            "reason": "insufficient_rows",
+        }
+
+    candidate = candidate_errors[:usable]
+    reference = reference_errors[:usable]
+    deltas = [candidate[idx] - reference[idx] for idx in range(usable)]
+    ci_low, ci_high = _bootstrap_ci_mean_delta(
+        deltas,
+        samples=max(100, bootstrap_samples),
+        alpha=max(1e-6, min(0.999999, alpha)),
+    )
+
+    candidate_mean = float(mean(candidate))
+    reference_mean = float(mean(reference))
+    improved = candidate_mean < reference_mean
+    significant = ci_high < 0.0
     return {
-        "rows": used,
-        "mape": metrics["mape"],
-        "wape": metrics["wape"],
-        "p95_ape": metrics["p95_ape"],
-        "by_bid_bucket": bucket_metrics,
+        "applicable": True,
+        "pass": bool(improved and significant),
+        "reason": "ok",
+        "candidate_mape": round(candidate_mean, 6),
+        "reference_mape": round(reference_mean, 6),
+        "delta_mape_mean": round(candidate_mean - reference_mean, 6),
+        "delta_mape_ci_low": round(ci_low, 6),
+        "delta_mape_ci_high": round(ci_high, 6),
+        "alpha": round(alpha, 6),
+        "bootstrap_samples": max(100, bootstrap_samples),
     }
 
 
 def build_report(
+    *,
     resale_eval: dict,
     auction_eval: dict,
     min_rows: int,
     resale_max_mape: float,
     auction_max_mape: float,
+    require_holdout: bool,
+    resale_eval_mode: str,
+    auction_eval_mode: str,
+    resale_significance: dict,
+    auction_significance: dict,
 ) -> dict:
-    resale_gate = (
+    resale_holdout_ok = (not require_holdout) or (resale_eval_mode == "holdout_test")
+    auction_holdout_ok = (not require_holdout) or (auction_eval_mode == "holdout_test")
+
+    resale_threshold_pass = (
         resale_eval["rows"] >= min_rows
         and resale_eval["mape"] is not None
         and float(resale_eval["mape"]) <= resale_max_mape
     )
-    auction_gate = (
+    auction_threshold_pass = (
         auction_eval["rows"] >= min_rows
         and auction_eval["mape"] is not None
         and float(auction_eval["mape"]) <= auction_max_mape
     )
 
+    resale_significance_pass = True
+    if resale_significance.get("applicable"):
+        resale_significance_pass = bool(resale_significance.get("pass"))
+
+    auction_significance_pass = True
+    if auction_significance.get("applicable"):
+        auction_significance_pass = bool(auction_significance.get("pass"))
+
+    resale_gate = resale_holdout_ok and resale_threshold_pass and resale_significance_pass
+    auction_gate = auction_holdout_ok and auction_threshold_pass and auction_significance_pass
     overall = resale_gate and auction_gate
 
     return {
@@ -229,6 +336,13 @@ def build_report(
             "overall_pass": overall,
             "resale_pass": resale_gate,
             "auction_pass": auction_gate,
+            "resale_threshold_pass": resale_threshold_pass,
+            "auction_threshold_pass": auction_threshold_pass,
+            "resale_holdout_ok": resale_holdout_ok,
+            "auction_holdout_ok": auction_holdout_ok,
+            "resale_significance_pass": resale_significance_pass,
+            "auction_significance_pass": auction_significance_pass,
+            "require_holdout": require_holdout,
             "min_rows": min_rows,
             "resale_max_mape": resale_max_mape,
             "auction_max_mape": auction_max_mape,
@@ -236,6 +350,10 @@ def build_report(
         "metrics": {
             "resale": resale_eval,
             "auction": auction_eval,
+        },
+        "significance": {
+            "resale": resale_significance,
+            "auction": auction_significance,
         },
     }
 
@@ -272,7 +390,47 @@ def parse_args() -> argparse.Namespace:
         default=0.8,
         help="Deterministic hash split train ratio in (0,1); evaluation runs on holdout test split",
     )
+    parser.add_argument(
+        "--reference-resale-artifact",
+        type=str,
+        default="",
+        help="Optional previous/active resale artifact path for significance testing",
+    )
+    parser.add_argument(
+        "--reference-auction-artifact",
+        type=str,
+        default="",
+        help="Optional previous/active auction artifact path for significance testing",
+    )
+    parser.add_argument(
+        "--bootstrap-samples",
+        type=int,
+        default=1000,
+        help="Bootstrap sample count for significance confidence interval",
+    )
+    parser.add_argument(
+        "--significance-alpha",
+        type=float,
+        default=0.05,
+        help="Two-sided alpha for bootstrap CI used in significance gate",
+    )
+    parser.add_argument(
+        "--require-holdout",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail gate when holdout rows are below --min-rows",
+    )
     return parser.parse_args()
+
+
+def _resolve_optional_path(value: str) -> Path | None:
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    path = Path(cleaned)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path
 
 
 def main() -> int:
@@ -300,15 +458,77 @@ def main() -> int:
     resale_artifact = _read_json(MODELS_DIR / "resale" / "baseline_v1.json")
     auction_artifact = _read_json(MODELS_DIR / "yahoo-auction" / "baseline_v1.json")
 
-    resale_eval = evaluate_resale(resale_eval_rows, resale_artifact)
-    auction_eval = evaluate_auction(auction_eval_rows, auction_artifact)
+    resale_eval, resale_candidate_errors = _evaluate_resale_internal(resale_eval_rows, resale_artifact)
+    auction_eval, auction_candidate_errors = _evaluate_auction_internal(auction_eval_rows, auction_artifact)
+
+    alpha = max(1e-6, min(0.999999, float(args.significance_alpha)))
+    bootstrap_samples = max(100, int(args.bootstrap_samples))
+
+    resale_significance: dict
+    reference_resale_path = _resolve_optional_path(args.reference_resale_artifact)
+    reference_resale_artifact = _read_json(reference_resale_path) if reference_resale_path else {}
+    if resale_eval_mode != "holdout_test":
+        resale_significance = {
+            "applicable": False,
+            "pass": None,
+            "reason": "non_holdout_eval_mode",
+        }
+    elif not reference_resale_artifact:
+        resale_significance = {
+            "applicable": False,
+            "pass": None,
+            "reason": "no_reference_artifact",
+        }
+    else:
+        _resale_reference_eval, resale_reference_errors = _evaluate_resale_internal(
+            resale_eval_rows,
+            reference_resale_artifact,
+        )
+        resale_significance = _significance_from_errors(
+            candidate_errors=resale_candidate_errors,
+            reference_errors=resale_reference_errors,
+            alpha=alpha,
+            bootstrap_samples=bootstrap_samples,
+        )
+
+    auction_significance: dict
+    reference_auction_path = _resolve_optional_path(args.reference_auction_artifact)
+    reference_auction_artifact = _read_json(reference_auction_path) if reference_auction_path else {}
+    if auction_eval_mode != "holdout_test":
+        auction_significance = {
+            "applicable": False,
+            "pass": None,
+            "reason": "non_holdout_eval_mode",
+        }
+    elif not reference_auction_artifact:
+        auction_significance = {
+            "applicable": False,
+            "pass": None,
+            "reason": "no_reference_artifact",
+        }
+    else:
+        _auction_reference_eval, auction_reference_errors = _evaluate_auction_internal(
+            auction_eval_rows,
+            reference_auction_artifact,
+        )
+        auction_significance = _significance_from_errors(
+            candidate_errors=auction_candidate_errors,
+            reference_errors=auction_reference_errors,
+            alpha=alpha,
+            bootstrap_samples=bootstrap_samples,
+        )
 
     report = build_report(
-        resale_eval,
-        auction_eval,
+        resale_eval=resale_eval,
+        auction_eval=auction_eval,
         min_rows=min_rows,
         resale_max_mape=max(0.0, args.resale_max_mape),
         auction_max_mape=max(0.0, args.auction_max_mape),
+        require_holdout=bool(args.require_holdout),
+        resale_eval_mode=resale_eval_mode,
+        auction_eval_mode=auction_eval_mode,
+        resale_significance=resale_significance,
+        auction_significance=auction_significance,
     )
     report["split"] = {
         "strategy": "deterministic_hash",

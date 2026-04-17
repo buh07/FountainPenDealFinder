@@ -3,6 +3,7 @@ from pathlib import Path
 
 from app.core.config import get_settings
 from app.models import RawListing
+from app.services import model_registry
 from app.services.model_registry import promote_candidate_artifact, switch_active_to_version
 from app.services.pricing_models import clear_model_artifact_cache, predict_resale_value
 
@@ -83,3 +84,36 @@ def test_active_pointer_switch_changes_inference_output(monkeypatch):
     second = predict_resale_value(_listing(), payload)
 
     assert second["resale_pred_jpy"] > first["resale_pred_jpy"]
+
+
+def test_switch_active_to_version_logs_warning_when_cache_clear_fails(monkeypatch, caplog):
+    tmp_root = Path("/tmp/fpdf_test_model_registry_cache_warning")
+    tmp_root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setenv("MODEL_VERSION_ROOT", str(tmp_root / "versions"))
+    monkeypatch.setenv("MODEL_ACTIVE_POINTER_RESALE", str(tmp_root / "resale" / "active_pointer.txt"))
+    monkeypatch.setenv("MODEL_ACTIVE_POINTER_AUCTION", str(tmp_root / "auction" / "active_pointer.txt"))
+    monkeypatch.setenv("RESALE_MODEL_ARTIFACT_PATH", str(tmp_root / "resale" / "baseline_v1.json"))
+    monkeypatch.setenv("AUCTION_MODEL_ARTIFACT_PATH", str(tmp_root / "auction" / "baseline_v1.json"))
+    get_settings.cache_clear()
+
+    candidate = tmp_root / "resale" / "baseline_v1.json"
+    _write_artifact(candidate, default_multiplier=1.5)
+    version = promote_candidate_artifact("resale", candidate)
+
+    import app.services.pricing_models as pricing_models
+
+    monkeypatch.setattr(
+        pricing_models,
+        "clear_model_artifact_cache",
+        lambda: (_ for _ in ()).throw(RuntimeError("cache-clear-failure")),
+    )
+
+    with caplog.at_level("WARNING"):
+        model_registry.switch_active_to_version("resale", str(version["version_id"]))
+
+    assert any(
+        "Failed to clear model artifact cache after active version switch" in record.message
+        for record in caplog.records
+    )
+    get_settings.cache_clear()

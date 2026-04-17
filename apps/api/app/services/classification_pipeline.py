@@ -15,19 +15,81 @@ CONDITION_KEYWORDS = [
     ("傷", "micro_scratches"),
     ("スレ", "micro_scratches"),
     ("scratch", "micro_scratches"),
+    ("deep scratch", "deep_scratches"),
+    ("deep scratches", "deep_scratches"),
+    ("深い傷", "deep_scratches"),
+    ("目立つ傷", "deep_scratches"),
     ("凹", "dent_or_ding"),
     ("dent", "dent_or_ding"),
     ("メッキ", "plating_wear"),
     ("錆", "trim_wear"),
+    ("cap band", "cap_band_damage"),
+    ("キャップリング", "cap_band_damage"),
+    ("リング割れ", "cap_band_damage"),
+    ("clip damage", "clip_damage"),
+    ("clip bent", "clip_damage"),
+    ("clip loose", "clip_damage"),
+    ("クリップ曲が", "clip_damage"),
+    ("クリップ破損", "clip_damage"),
     ("曲が", "bent_nib_possible"),
     ("割れ", "hairline_crack"),
     ("ヒビ", "hairline_crack"),
+    ("thread damage", "thread_damage"),
+    ("thread worn", "thread_damage"),
+    ("ねじ山", "thread_damage"),
+    ("ネジ山", "thread_damage"),
+    ("stain", "barrel_staining"),
+    ("staining", "barrel_staining"),
+    ("インク染み", "barrel_staining"),
+    ("変色", "barrel_staining"),
+    ("tip unclear", "nib_tipping_unclear"),
+    ("tipping unclear", "nib_tipping_unclear"),
+    ("nib tip unclear", "nib_tipping_unclear"),
+    ("ペン先確認不可", "nib_tipping_unclear"),
+    ("misaligned tines", "misaligned_tines_possible"),
+    ("tine misalign", "misaligned_tines_possible"),
+    ("左右不揃い", "misaligned_tines_possible"),
+    ("先割れ", "misaligned_tines_possible"),
+    ("feed issue", "feed_issue_possible"),
+    ("flow issue", "feed_issue_possible"),
+    ("インクフロー不良", "feed_issue_possible"),
+    ("インク出ない", "feed_issue_possible"),
+    ("掠れ", "feed_issue_possible"),
+    ("漆剥", "urushi_damage"),
+    ("urushi damage", "urushi_damage"),
+    ("maki-e wear", "maki_e_wear"),
+    ("maki e wear", "maki_e_wear"),
+    ("蒔絵摩耗", "maki_e_wear"),
+    ("蒔絵剥", "maki_e_wear"),
     ("ジャンク", "parts_repair"),
     ("repair", "parts_repair"),
     ("名入れ", "name_engraving"),
     ("engraving", "name_engraving"),
     ("漆", "urushi_finish"),
+    ("converter missing", "missing_converter"),
+    ("コンバーター欠品", "missing_converter"),
+    ("コンバータなし", "missing_converter"),
+    ("missing box", "missing_box"),
+    ("box missing", "missing_box"),
+    ("箱なし", "missing_box"),
+    ("本体のみ", "missing_box"),
 ]
+
+
+def _normalized_condition_keywords() -> list[tuple[str, str, int]]:
+    normalized: list[tuple[str, str, int]] = []
+    for index, (keyword, flag) in enumerate(CONDITION_KEYWORDS):
+        lowered_keyword = str(keyword or "").strip().lower()
+        if not lowered_keyword:
+            continue
+        normalized.append((lowered_keyword, flag, index))
+
+    # Match longer / more specific phrases first, then preserve source order.
+    normalized.sort(key=lambda item: (-len(item[0]), item[2]))
+    return normalized
+
+
+CONDITION_KEYWORDS_NORMALIZED = _normalized_condition_keywords()
 
 
 def _normalize_identifier(value: str) -> str:
@@ -60,13 +122,36 @@ def _estimate_item_count(text: str, lot_size_hint: int) -> int:
 
 
 def _extract_condition_flags(text: str) -> list[str]:
-    lower = text.lower()
-    flags = [flag for keyword, flag in CONDITION_KEYWORDS if keyword in lower]
-    deduped: list[str] = []
-    for flag in flags:
-        if flag not in deduped:
-            deduped.append(flag)
-    return deduped
+    searchable = str(text or "").lower()
+    if not searchable:
+        return []
+
+    matched_flags: list[str] = []
+    matched_spans: list[tuple[int, int]] = []
+
+    def _contained_within(existing: tuple[int, int], candidate: tuple[int, int]) -> bool:
+        return candidate[0] >= existing[0] and candidate[1] <= existing[1]
+
+    for keyword, flag, _order in CONDITION_KEYWORDS_NORMALIZED:
+        start = 0
+        keyword_matched = False
+        while True:
+            idx = searchable.find(keyword, start)
+            if idx < 0:
+                break
+            span = (idx, idx + len(keyword))
+            if any(_contained_within(existing, span) for existing in matched_spans):
+                start = idx + 1
+                continue
+
+            matched_spans.append(span)
+            keyword_matched = True
+            break
+
+        if keyword_matched and flag not in matched_flags:
+            matched_flags.append(flag)
+
+    return matched_flags
 
 
 def _text_blob(listing: RawListing) -> str:
@@ -137,7 +222,7 @@ def _stage1_text_candidates(text_blob: str) -> dict[str, Any]:
     }
 
 
-def _stage2_image_embedding_inference(
+def _stage2_image_hint_inference(
     listing: RawListing,
     text_stage: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -191,6 +276,8 @@ def _stage2_image_embedding_inference(
         "confidence": round(confidence, 3),
         "evidence": {
             "model": settings.image_embedding_model_name,
+            "signal_type": "url_token_heuristic",
+            "is_ml_inference": False,
             "matched_score": best_score,
             "matched_tokens": best_entry.get("matched_tokens", []),
             "images_used": min(5, len(image_urls)),
@@ -247,7 +334,18 @@ def _stage5_condition_resolution(text_blob: str) -> dict[str, Any]:
     condition_flags = _extract_condition_flags(text_blob)
     if "parts_repair" in condition_flags:
         condition_grade = "Parts/Repair"
-    elif any(flag in condition_flags for flag in ["hairline_crack", "bent_nib_possible"]):
+    elif any(
+        flag in condition_flags
+        for flag in [
+            "hairline_crack",
+            "bent_nib_possible",
+            "deep_scratches",
+            "thread_damage",
+            "misaligned_tines_possible",
+            "feed_issue_possible",
+            "urushi_damage",
+        ]
+    ):
         condition_grade = "C"
     elif any(token in text_blob for token in ["目立った傷や汚れなし", "美品", "good condition"]):
         condition_grade = "B+"
@@ -255,7 +353,9 @@ def _stage5_condition_resolution(text_blob: str) -> dict[str, Any]:
         condition_grade = "B"
 
     condition_grade = canonicalize_condition_grade(condition_grade)
-    condition_confidence = 0.76 if condition_flags else 0.5
+    condition_confidence = 0.5
+    if condition_flags:
+        condition_confidence = min(0.88, 0.68 + (0.04 * min(len(condition_flags), 5)))
 
     return {
         "condition_grade": condition_grade,
@@ -284,8 +384,10 @@ def _stage6_uncertainty_and_explanation(
         uncertainty_tags.append("condition_risk_high")
     if image_stage is None:
         uncertainty_tags.append("image_evidence_unavailable")
-    elif not image_blend_applied:
-        uncertainty_tags.append("image_evidence_low_confidence")
+    else:
+        uncertainty_tags.append("image_evidence_heuristic_only")
+        if not image_blend_applied:
+            uncertainty_tags.append("image_evidence_low_confidence")
 
     explanation = {
         "stage1_text": {
@@ -308,7 +410,7 @@ def classify_listing_multi_stage(listing: RawListing) -> dict[str, Any]:
     settings = get_settings()
 
     stage1 = _stage1_text_candidates(text_blob)
-    stage2 = _stage2_image_embedding_inference(listing, stage1)
+    stage2 = _stage2_image_hint_inference(listing, stage1)
     stage3 = _stage3_lot_decomposition(listing, text_blob)
     stage4 = _stage4_taxonomy_resolution(text_blob, stage1, stage2)
     stage5 = _stage5_condition_resolution(text_blob)
@@ -316,13 +418,9 @@ def classify_listing_multi_stage(listing: RawListing) -> dict[str, Any]:
     base_conf = 0.82 if stage4["brand"] != "Unknown" else 0.48
     lot_penalty = min(0.35, 0.05 * max(0, int(stage3["item_count_estimate"]) - 1))
     classification_confidence = max(0.35, min(0.97, base_conf - lot_penalty))
-    image_blend_applied = False
-    if stage2 is not None and float(stage2["confidence"]) >= settings.image_classifier_blend_min_confidence:
-        classification_confidence = min(
-            0.97,
-            (classification_confidence * 0.75) + (float(stage2["confidence"]) * 0.25),
-        )
-        image_blend_applied = True
+    image_blend_applied = (
+        stage2 is not None and float(stage2.get("confidence") or 0.0) >= settings.image_classifier_blend_min_confidence
+    )
 
     uncertainty_tags, stage_explanations = _stage6_uncertainty_and_explanation(
         taxonomy_stage=stage4,

@@ -1,16 +1,11 @@
 {
   "artifact": "resale_baseline",
-  "version": "20260409T232829Z",
-  "trained_at": "2026-04-09T23:28:29.111917+00:00",
+  "version": "20260411T210557Z",
+  "trained_at": "2026-04-11T21:05:57.626295+00:00",
   "rows_used": 6,
   "default_multiplier": 1.6363,
-  "brand_multipliers": {
-    "Montblanc": 1.3846,
-    "Pilot": 1.7253,
-    "Platinum": 1.6316,
-    "Sailor": 1.68,
-    "Unknown": 1.1333
-  },
+  "brand_multipliers": {},
+  "brand_min_samples": 3,
   "line_multipliers": {},
   "line_min_samples": 2,
   "condition_penalties": {

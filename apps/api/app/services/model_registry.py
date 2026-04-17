@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from ..core.config import get_settings
+
+
+logger = logging.getLogger(__name__)
 
 
 ModelTask = Literal["resale", "auction"]
@@ -194,7 +198,14 @@ def switch_active_to_version(task: ModelTask, version_id: str) -> dict[str, str 
 
         clear_model_artifact_cache()
     except Exception:
-        pass
+        logger.warning(
+            "Failed to clear model artifact cache after active version switch",
+            extra={
+                "task": task,
+                "version_id": version_id,
+            },
+            exc_info=True,
+        )
     record = get_active_model_version(task)
     if record is None:
         raise RuntimeError(f"Failed to resolve active version for task={task}")
@@ -210,7 +221,14 @@ def switch_active_to_artifact(task: ModelTask, artifact_path: Path) -> dict[str,
 
         clear_model_artifact_cache()
     except Exception:
-        pass
+        logger.warning(
+            "Failed to clear model artifact cache after active artifact switch",
+            extra={
+                "task": task,
+                "artifact_path": str(artifact_path),
+            },
+            exc_info=True,
+        )
     record = get_active_model_version(task)
     if record is None:
         raise RuntimeError(f"Failed to resolve active version for task={task}")

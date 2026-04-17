@@ -92,9 +92,13 @@ def test_taxonomy_standard_endpoint_returns_categories_and_conditions():
     payload = response.json()
     assert "categories" in payload
     assert "conditions" in payload
+    assert "condition_taxonomy" in payload
+    assert "damage_flag_taxonomy" in payload
     assert "types" in payload
     assert "B+" in payload["conditions"]
     assert any(item["brand"] == "Pilot" for item in payload["types"])
+    assert "missing_converter" in payload["damage_flag_taxonomy"]
+    assert len(payload["types"]) >= 20
 
 
 def test_taxonomy_normalization_resolves_aliases_and_condition():

@@ -31,7 +31,7 @@
 
       .controls {
         display: grid;
-        grid-template-columns: 1fr auto auto;
+        grid-template-columns: 1fr minmax(140px, auto) minmax(170px, auto) minmax(120px, auto) auto;
         gap: 10px;
         margin: 16px 0;
       }
@@ -74,6 +74,44 @@
         border-radius: 14px;
         padding: 14px;
         margin: 14px 0;
+      }
+
+      .thumbs {
+        margin: 10px 0;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 8px;
+      }
+
+      .thumbs img {
+        width: 100%;
+        height: 90px;
+        object-fit: cover;
+        border-radius: 10px;
+        border: 1px solid #e4cfaf;
+        background: #fff;
+      }
+
+      .confidence-grid {
+        margin: 10px 0 4px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 6px 10px;
+        font-size: 13px;
+      }
+
+      .watch-btn {
+        background: #1f1a17;
+        border: 0;
+        border-radius: 10px;
+        color: #fff;
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+
+      .watch-summary {
+        margin: 10px 0 0;
+        font-size: 14px;
       }
 
       .meta {
@@ -126,11 +164,23 @@
 
       <div class="controls">
         <input id="apiBase" value="http://localhost:8000" aria-label="API Base URL" />
+        <select id="bucket" aria-label="Deal bucket">
+          <option value="">all scored</option>
+          <option value="confident">confident</option>
+          <option value="potential">potential</option>
+          <option value="discard">discard</option>
+        </select>
+        <select id="sortBy" aria-label="Ranking view">
+          <option value="risk_adjusted">risk-adjusted profit</option>
+          <option value="flat_profit">flat profit</option>
+          <option value="percent_profit">percent profit</option>
+        </select>
         <input id="limit" type="number" value="20" min="1" max="100" aria-label="Listing limit" />
         <button id="loadBtn">Load Listings</button>
       </div>
 
       <div class="status" id="status"></div>
+      <div class="watch-summary" id="watchSummary"></div>
       <section id="listings"></section>
     </main>
 
@@ -147,6 +197,44 @@
 
       const statusEl = document.getElementById("status");
       const listingsEl = document.getElementById("listings");
+      const watchSummaryEl = document.getElementById("watchSummary");
+      const WATCHLIST_KEY = "fpdf_watchlist_v1";
+
+      function loadWatchlist() {
+        try {
+          const payload = JSON.parse(localStorage.getItem(WATCHLIST_KEY) || "[]");
+          if (!Array.isArray(payload)) return [];
+          return payload.filter((row) => row && row.listing_id);
+        } catch {
+          return [];
+        }
+      }
+
+      function saveWatchlist(rows) {
+        localStorage.setItem(WATCHLIST_KEY, JSON.stringify(rows.slice(0, 200)));
+      }
+
+      function addWatch(item) {
+        const rows = loadWatchlist();
+        if (!rows.some((row) => row.listing_id === item.listing_id)) {
+          rows.unshift({
+            listing_id: item.listing_id,
+            listing_title: item.listing_title,
+            listing_url: item.listing_url,
+            marketplace: item.marketplace,
+            saved_at: new Date().toISOString(),
+          });
+          saveWatchlist(rows);
+        }
+        renderWatchSummary();
+      }
+
+      function renderWatchSummary() {
+        const rows = loadWatchlist();
+        watchSummaryEl.textContent = rows.length
+          ? `Watchlist: ${rows.length} listing(s) saved.`
+          : "Watchlist is empty.";
+      }
 
       function setStatus(message) {
         statusEl.textContent = message;
@@ -154,12 +242,18 @@
 
       async function loadListings() {
         const apiBase = document.getElementById("apiBase").value.trim();
+        const bucket = document.getElementById("bucket").value;
+        const sortBy = document.getElementById("sortBy").value;
         const limit = Number(document.getElementById("limit").value || 20);
 
         setStatus("Loading listings...");
         listingsEl.innerHTML = "";
 
-        const url = `${apiBase}/listings?limit=${encodeURIComponent(limit)}`;
+        const params = new URLSearchParams();
+        params.set("limit", String(limit));
+        params.set("sort_by", sortBy);
+        if (bucket) params.set("bucket", bucket);
+        const url = `${apiBase}/listings?${params.toString()}`;
         const response = await fetch(url);
         if (!response.ok) {
           throw new Error(`Failed to load listings: ${response.status}`);
@@ -180,6 +274,24 @@
       function renderListingCard(apiBase, item) {
         const card = document.createElement("article");
         card.className = "listing-card";
+        const thumbs = (item.image_urls || [])
+          .slice(0, 6)
+          .map(
+            (url) =>
+              `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="listing image" loading="lazy" /></a>`
+          )
+          .join("");
+        const components = [
+          ["Classification", item.classification_confidence],
+          ["Condition", item.condition_confidence],
+          ["Lot Decomposition", item.lot_decomposition_confidence],
+          ["Valuation", item.valuation_confidence],
+          ["Auction", item.auction_confidence],
+          ["Proxy Cost", item.cost_confidence],
+        ]
+          .filter((entry) => typeof entry[1] === "number")
+          .map(([label, value]) => `<div><strong>${label}:</strong> ${(value * 100).toFixed(1)}%</div>`)
+          .join("");
 
         const actionOptions = ACTION_OPTIONS.map(
           (value) => `<option value="${value}">${value}</option>`
@@ -196,7 +308,12 @@
             <div><strong>Confidence:</strong> ${(item.confidence * 100).toFixed(1)}%</div>
             <div><strong>Proxy:</strong> ${item.recommended_proxy}</div>
           </div>
+          ${thumbs ? `<div class="thumbs">${thumbs}</div>` : ""}
+          ${components ? `<div class="confidence-grid">${components}</div>` : ""}
           <p><a href="${item.listing_url}" target="_blank" rel="noopener">Open listing</a></p>
+          <p>
+            <button class="watch-btn" type="button">Watch This Auction</button>
+          </p>
 
           <div class="review-row">
             <select class="review-action">${actionOptions}</select>
@@ -207,6 +324,12 @@
             <button class="submit-btn">Submit Review</button>
           </div>
         `;
+
+        const watchBtn = card.querySelector(".watch-btn");
+        watchBtn.addEventListener("click", () => {
+          addWatch(item);
+          setStatus(`Saved ${item.listing_id} to watchlist.`);
+        });
 
         const submitBtn = card.querySelector(".submit-btn");
         submitBtn.addEventListener("click", async () => {
@@ -260,6 +383,8 @@
           setStatus(String(error));
         }
       });
+
+      renderWatchSummary();
     </script>
   </body>
 </html>

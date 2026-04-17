@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from statistics import median
 
+from ..core.config import get_settings
 from ..models import RawListing
 from .model_registry import resolve_active_artifact_path
 from .taxonomy import classification_id_for
@@ -59,8 +60,11 @@ def _dataset_fingerprint(path: Path) -> str:
     )
 
 
-@lru_cache(maxsize=8)
-def _load_resale_fallback_heuristics(dataset_fingerprint: str) -> dict[str, float]:
+@lru_cache(maxsize=16)
+def _load_resale_fallback_heuristics(
+    dataset_fingerprint: str,
+    brand_min_samples: int,
+) -> dict[str, float]:
     if dataset_fingerprint == "missing":
         return {}
     try:
@@ -85,14 +89,16 @@ def _load_resale_fallback_heuristics(dataset_fingerprint: str) -> dict[str, floa
         return {}
 
     multipliers: dict[str, float] = {}
+    min_samples = max(1, int(brand_min_samples))
     for brand, values in brand_ratios.items():
-        if len(values) < 2:
+        if len(values) < min_samples:
             continue
         multipliers[brand] = round(float(median(values)), 4)
     return multipliers
 
 
 def _heuristic_resale_prediction(listing: RawListing, classification_payload: dict) -> tuple[int, int, int, float]:
+    settings = get_settings()
     multipliers = {
         "Pilot": 1.75,
         "Namiki": 2.0,
@@ -103,7 +109,10 @@ def _heuristic_resale_prediction(listing: RawListing, classification_payload: di
         "Montblanc": 1.85,
         "Unknown": 1.3,
     }
-    dynamic_multipliers = _load_resale_fallback_heuristics(_dataset_fingerprint(_pen_swap_dataset_path()))
+    dynamic_multipliers = _load_resale_fallback_heuristics(
+        _dataset_fingerprint(_pen_swap_dataset_path()),
+        brand_min_samples=max(1, int(settings.resale_brand_min_samples)),
+    )
     if dynamic_multipliers:
         multipliers.update(dynamic_multipliers)
 

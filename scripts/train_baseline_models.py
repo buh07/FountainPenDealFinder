@@ -54,7 +54,7 @@ def _split_rows(rows: list[dict[str, str]], train_ratio: float) -> tuple[list[di
     return train_rows, test_rows
 
 
-def train_resale_model(rows: list[dict[str, str]]) -> dict:
+def train_resale_model(rows: list[dict[str, str]], *, brand_min_samples: int) -> dict:
     clean_rows: list[dict] = []
     for row in rows:
         ask = int(float(row.get("ask_price_jpy") or 0))
@@ -95,6 +95,7 @@ def train_resale_model(rows: list[dict[str, str]]) -> dict:
     brand_multipliers = {
         brand: round(median(values), 4)
         for brand, values in sorted(brand_ratios.items())
+        if len(values) >= max(1, brand_min_samples)
     }
     line_multipliers = {
         classification_id: round(median(values), 4)
@@ -129,6 +130,7 @@ def train_resale_model(rows: list[dict[str, str]]) -> dict:
         "rows_used": len(clean_rows),
         "default_multiplier": round(default_multiplier, 4),
         "brand_multipliers": brand_multipliers,
+        "brand_min_samples": max(1, brand_min_samples),
         "line_multipliers": line_multipliers,
         "line_min_samples": 2,
         "condition_penalties": condition_penalties,
@@ -211,6 +213,12 @@ def main() -> None:
         default="",
         help="Optional artifact version metadata override",
     )
+    parser.add_argument(
+        "--resale-brand-min-samples",
+        type=int,
+        default=3,
+        help="Minimum rows required before learning a brand-specific resale multiplier",
+    )
     args = parser.parse_args()
 
     train_ratio = min(0.95, max(0.05, float(args.train_ratio)))
@@ -225,7 +233,10 @@ def main() -> None:
     resale_train_rows, resale_test_rows = _split_rows(resale_rows, train_ratio)
     auction_train_rows, auction_test_rows = _split_rows(auction_rows, train_ratio)
 
-    resale_artifact = train_resale_model(resale_train_rows)
+    resale_artifact = train_resale_model(
+        resale_train_rows,
+        brand_min_samples=max(1, int(args.resale_brand_min_samples)),
+    )
     auction_artifact = train_auction_model(auction_train_rows)
 
     if resale_artifact:

@@ -173,6 +173,11 @@ def dispatch_health_alerts(
         "baseline_eval_pass": metrics.baseline_eval_pass,
         "active_model_versions": metrics.active_model_versions,
         "model_age_hours": metrics.model_age_hours,
+        "recent_non_stale_listing_count": metrics.recent_non_stale_listing_count,
+        "latest_non_stale_listing_at": (
+            metrics.latest_non_stale_listing_at.isoformat() if metrics.latest_non_stale_listing_at else None
+        ),
+        "listing_freshness_hours": metrics.listing_freshness_hours,
     }
 
     try:

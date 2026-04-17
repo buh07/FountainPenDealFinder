@@ -1,7 +1,7 @@
 {
   "artifact": "auction_baseline",
-  "version": "20260409T232829Z",
-  "trained_at": "2026-04-09T23:28:29.111951+00:00",
+  "version": "20260411T210557Z",
+  "trained_at": "2026-04-11T21:05:57.626330+00:00",
   "rows_used": 5,
   "bid_bucket_expected_multipliers": {
     "1_3": 1.3139,

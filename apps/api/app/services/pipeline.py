@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import time
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -26,6 +27,7 @@ from ..models import (
 )
 from .listing_quality import derive_price_status, get_default_timezone, has_positive_price, parse_raw_attributes, to_utc
 from .classification_pipeline import classify_listing_multi_stage
+from .confidence_calibration import calibrate_classification_confidence
 from .object_store import capture_listing_assets
 from .ops_telemetry import record_ingestion_failure
 from .pricing_models import predict_auction_value, predict_resale_value
@@ -760,6 +762,17 @@ def score_single_listing(session: Session, listing: RawListing) -> dict[str, Any
     price_status = _listing_price_status(listing)
 
     classification_payload = classify_listing(listing)
+    raw_classification_confidence = float(classification_payload.get("classification_confidence") or 0.0)
+    calibrated_confidence, calibration_info = calibrate_classification_confidence(
+        session,
+        raw_classification_confidence,
+    )
+    classification_payload["classification_confidence_raw"] = round(raw_classification_confidence, 3)
+    classification_payload["classification_confidence"] = round(calibrated_confidence, 3)
+    stage_explanations = classification_payload.get("stage_explanations")
+    if isinstance(stage_explanations, dict):
+        stage_explanations["confidence_calibration"] = calibration_info
+
     classification_row = _upsert_classification(session, listing.listing_id, classification_payload)
 
     if price_status == "valid":
@@ -883,6 +896,8 @@ def _priority_score_for_listing(
     *,
     now: datetime,
     window_hours: int,
+    value_signal: float = 0.0,
+    rarity_signal: float = 0.0,
 ) -> float:
     ends_at = to_utc(listing.ends_at)
     if ends_at is None:
@@ -894,8 +909,17 @@ def _priority_score_for_listing(
 
     underpricing_signal = max(0.0, min(1.0, float(deal_score.expected_profit_pct)))
     confidence_signal = max(0.0, min(1.0, float(deal_score.confidence_overall)))
+    value_signal_norm = max(0.0, min(1.0, float(value_signal)))
+    rarity_signal_norm = max(0.0, min(1.0, float(rarity_signal)))
 
-    return round((0.5 * underpricing_signal) + (0.3 * confidence_signal) + (0.2 * urgency), 4)
+    return round(
+        (0.35 * underpricing_signal)
+        + (0.25 * confidence_signal)
+        + (0.15 * urgency)
+        + (0.15 * value_signal_norm)
+        + (0.10 * rarity_signal_norm),
+        4,
+    )
 
 
 def select_priority_auction_candidates(
@@ -905,12 +929,16 @@ def select_priority_auction_candidates(
     threshold: float,
     limit: int = 100,
 ) -> list[tuple[RawListing, float]]:
+    settings = get_settings()
     now = datetime.now(timezone.utc)
     window_end = now + timedelta(hours=max(1, window_hours))
+    value_ceiling = max(1.0, float(settings.priority_value_reference_jpy_ceiling))
 
     rows = session.execute(
-        select(RawListing, DealScore)
+        select(RawListing, DealScore, ValuationPrediction, ClassificationResult)
         .join(DealScore, DealScore.listing_id == RawListing.listing_id)
+        .outerjoin(ValuationPrediction, ValuationPrediction.listing_id == RawListing.listing_id)
+        .outerjoin(ClassificationResult, ClassificationResult.listing_id == RawListing.listing_id)
         .where(
             RawListing.listing_format == "auction",
             RawListing.ends_at.is_not(None),
@@ -920,13 +948,40 @@ def select_priority_auction_candidates(
         .order_by(RawListing.ends_at.asc())
     ).all()
 
+    class_counts: Counter[str] = Counter()
+    for _listing, _deal_score, _valuation, classification in rows:
+        class_key = (
+            str(classification.classification_id)
+            if classification and classification.classification_id
+            else "unknown_fountain_pen"
+        )
+        class_counts[class_key] += 1
+
     scored: list[tuple[RawListing, float]] = []
-    for listing, deal_score in rows:
+    for listing, deal_score, valuation, classification in rows:
+        value_reference = int(
+            (valuation.resale_pred_jpy if valuation and valuation.resale_pred_jpy else 0)
+            or (listing.price_buy_now_jpy or listing.current_price_jpy or 0)
+        )
+        value_signal = max(0.0, min(1.0, value_reference / value_ceiling))
+
+        class_key = (
+            str(classification.classification_id)
+            if classification and classification.classification_id
+            else "unknown_fountain_pen"
+        )
+        class_count = max(1, class_counts.get(class_key, 1))
+        rarity_signal = max(0.0, min(1.0, 1.0 / (class_count**0.5)))
+        if classification and classification.brand in {"Namiki", "Nakaya", "Montblanc"}:
+            rarity_signal = min(1.0, rarity_signal + 0.1)
+
         score = _priority_score_for_listing(
             listing,
             deal_score,
             now=now,
             window_hours=max(1, window_hours),
+            value_signal=value_signal,
+            rarity_signal=rarity_signal,
         )
         if score >= threshold:
             scored.append((listing, score))
@@ -966,6 +1021,13 @@ def run_priority_auction_refresh(
         try:
             payload = adapter.fetch_listing_detail(listing.source_listing_id)
         except Exception:
+            logger.exception(
+                "Priority detail fetch failed",
+                extra={
+                    "source": listing.source,
+                    "source_listing_id": listing.source_listing_id,
+                },
+            )
             record_ingestion_failure(f"{listing.source}:priority_detail_fetch_exception")
             continue
         if not payload:

@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -47,6 +48,22 @@ def _read_baseline_eval_pass() -> bool | None:
     return bool(value) if isinstance(value, bool) else None
 
 
+def _raw_attributes(listing: RawListing) -> dict[str, Any]:
+    raw_json = str(listing.raw_attributes_json or "").strip()
+    if not raw_json:
+        return {}
+    try:
+        payload = json.loads(raw_json)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_stale_fixture_row(listing: RawListing) -> bool:
+    attrs = _raw_attributes(listing)
+    return bool(attrs.get("fixture_stale_fallback"))
+
+
 def _model_age_hours(task: str, now: datetime) -> tuple[str | None, float | None]:
     active = get_active_model_version(task)  # type: ignore[arg-type]
     if not isinstance(active, dict):
@@ -76,6 +93,7 @@ def build_health_metrics(session: Session, window_hours: int) -> HealthMetricsRe
         source_counts[listing.source] = source_counts.get(listing.source, 0) + 1
 
     total_recent = len(listings)
+    recent_non_stale_listing_count = sum(1 for row in listings if not _is_stale_fixture_row(row))
     parse_completeness_avg = 0.0
     if listings:
         parse_completeness_avg = sum(_parse_completeness(row) for row in listings) / len(listings)
@@ -132,6 +150,26 @@ def build_health_metrics(session: Session, window_hours: int) -> HealthMetricsRe
     if baseline_eval_pass is False:
         alerts.append("baseline_eval_failed")
 
+    latest_non_stale_listing_at = None
+    rows_by_recency = session.scalars(select(RawListing).order_by(RawListing.updated_at.desc())).all()
+    for row in rows_by_recency:
+        if _is_stale_fixture_row(row):
+            continue
+        latest_non_stale_listing_at = row.updated_at
+        break
+
+    listing_freshness_hours: float | None = None
+    if latest_non_stale_listing_at is not None:
+        ts = latest_non_stale_listing_at
+        ts_utc = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        listing_freshness_hours = round(
+            max(0.0, (now - ts_utc.astimezone(timezone.utc)).total_seconds() / 3600.0),
+            3,
+        )
+
+    if listing_freshness_hours is None or listing_freshness_hours > settings.monitoring_max_listing_staleness_hours:
+        alerts.append("listing_data_stale")
+
     active_model_versions: dict[str, str | None] = {}
     model_age_hours: dict[str, float | None] = {}
     for task in ("resale", "auction"):
@@ -165,5 +203,8 @@ def build_health_metrics(session: Session, window_hours: int) -> HealthMetricsRe
         ),
         active_model_versions=active_model_versions,
         model_age_hours=model_age_hours,
+        recent_non_stale_listing_count=recent_non_stale_listing_count,
+        latest_non_stale_listing_at=latest_non_stale_listing_at,
+        listing_freshness_hours=listing_freshness_hours,
         alerts=alerts,
     )

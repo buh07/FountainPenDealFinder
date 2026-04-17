@@ -44,6 +44,7 @@ def test_image_stage_can_disambiguate_line_when_text_is_ambiguous(monkeypatch):
     assert payload["classification_id"] == "pilot_custom_743"
     assert payload["image_evidence"] is not None
     assert "image_evidence_unavailable" not in payload["uncertainty_tags"]
+    assert "image_evidence_heuristic_only" in payload["uncertainty_tags"]
 
 
 def test_text_only_fallback_when_image_stage_disabled(monkeypatch):
@@ -90,4 +91,85 @@ def test_low_confidence_image_signal_is_flagged_without_confidence_blend(monkeyp
     payload = classify_listing_multi_stage(listing)
     assert payload["image_evidence"] is not None
     assert "image_evidence_low_confidence" in payload["uncertainty_tags"]
+    get_settings.cache_clear()
+
+
+def test_image_stage_does_not_directly_change_confidence(monkeypatch):
+    monkeypatch.setenv("IMAGE_CLASSIFIER_ENABLED", "true")
+    get_settings.cache_clear()
+
+    base = _listing(
+        title="Pilot Custom 743 fountain pen",
+        images_json="[]",
+    )
+    with_hint = _listing(
+        title="Pilot Custom 743 fountain pen",
+        images_json='["https://cdn.example.com/pilot_custom_743_front.jpg"]',
+    )
+
+    base_payload = classify_listing_multi_stage(base)
+    hint_payload = classify_listing_multi_stage(with_hint)
+
+    assert hint_payload["image_evidence"] is not None
+    assert base_payload["classification_confidence"] == hint_payload["classification_confidence"]
+    assert "image_evidence_heuristic_only" in hint_payload["uncertainty_tags"]
+    get_settings.cache_clear()
+
+
+def test_condition_stage_extracts_extended_damage_flags(monkeypatch):
+    monkeypatch.setenv("IMAGE_CLASSIFIER_ENABLED", "false")
+    get_settings.cache_clear()
+
+    listing = _listing(
+        title="Namiki urushi",
+        condition_text=(
+            "deep scratches cap band damage clip damage thread damage barrel staining "
+            "nib tip unclear misaligned tines feed issue maki-e wear missing converter missing box"
+        ),
+    )
+    payload = classify_listing_multi_stage(listing)
+    flags = set(payload["condition_flags"])
+
+    assert "deep_scratches" in flags
+    assert "cap_band_damage" in flags
+    assert "clip_damage" in flags
+    assert "thread_damage" in flags
+    assert "barrel_staining" in flags
+    assert "nib_tipping_unclear" in flags
+    assert "misaligned_tines_possible" in flags
+    assert "feed_issue_possible" in flags
+    assert "maki_e_wear" in flags
+    assert "missing_converter" in flags
+    assert "missing_box" in flags
+    get_settings.cache_clear()
+
+
+def test_condition_stage_overlap_avoids_clip_phrase_triggering_bent_nib(monkeypatch):
+    monkeypatch.setenv("IMAGE_CLASSIFIER_ENABLED", "false")
+    get_settings.cache_clear()
+
+    listing = _listing(
+        title="Pilot capless",
+        condition_text="クリップ曲があり",
+    )
+    payload = classify_listing_multi_stage(listing)
+    flags = set(payload["condition_flags"])
+
+    assert "clip_damage" in flags
+    assert "bent_nib_possible" not in flags
+    get_settings.cache_clear()
+
+
+def test_condition_stage_keywords_match_case_insensitive_latin_terms(monkeypatch):
+    monkeypatch.setenv("IMAGE_CLASSIFIER_ENABLED", "false")
+    get_settings.cache_clear()
+
+    listing = _listing(
+        title="Namiki",
+        condition_text="Maki-E Wear visible",
+    )
+    payload = classify_listing_multi_stage(listing)
+    flags = set(payload["condition_flags"])
+
+    assert "maki_e_wear" in flags
     get_settings.cache_clear()

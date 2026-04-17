@@ -42,3 +42,31 @@ def test_settings_rejects_wildcard_cors_methods_headers():
 
     with pytest.raises(ValidationError):
         Settings(cors_allow_headers="*")
+
+
+def test_settings_rejects_invalid_significance_and_bootstrap_settings():
+    with pytest.raises(ValidationError):
+        Settings(baseline_eval_significance_alpha=0.0)
+
+    with pytest.raises(ValidationError):
+        Settings(baseline_eval_bootstrap_samples=50)
+
+
+def test_settings_rejects_invalid_calibration_and_staleness_settings():
+    with pytest.raises(ValidationError):
+        Settings(classification_calibration_min_rows=3)
+
+    with pytest.raises(ValidationError):
+        Settings(classification_calibration_bin_count=1)
+
+    with pytest.raises(ValidationError):
+        Settings(monitoring_max_listing_staleness_hours=0)
+
+    with pytest.raises(ValidationError):
+        Settings(resale_brand_min_samples=0)
+
+    with pytest.raises(ValidationError):
+        Settings(proxy_first_time_user_penalty_jpy=-1)
+
+    with pytest.raises(ValidationError):
+        Settings(priority_value_reference_jpy_ceiling=0)

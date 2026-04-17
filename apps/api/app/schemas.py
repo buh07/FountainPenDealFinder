@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -39,6 +40,7 @@ class ListingSummary(BaseModel):
     marketplace: str
     listing_title: str
     listing_url: str
+    image_urls: list[str] = Field(default_factory=list)
     seller_id: str | None = None
     listing_type: ListingType
     price_status: PriceStatus = "valid"
@@ -48,6 +50,13 @@ class ListingSummary(BaseModel):
     expected_profit_jpy: int
     expected_profit_pct: float
     confidence: float = Field(ge=0.0, le=1.0)
+    classification_confidence: float | None = None
+    condition_confidence: float | None = None
+    lot_decomposition_confidence: float | None = None
+    valuation_confidence: float | None = None
+    auction_confidence: float | None = None
+    cost_confidence: float | None = None
+    stage_explanations: dict[str, Any] = Field(default_factory=dict)
     auction_low_win_price_jpy: int | None = None
     auction_expected_final_price_jpy: int | None = None
     recommended_proxy: str = "None"
@@ -61,6 +70,12 @@ class ListingSummary(BaseModel):
 class ListListingsResponse(BaseModel):
     total: int
     items: list[ListingSummary]
+
+
+class ListingImagesResponse(BaseModel):
+    listing_id: str
+    image_urls: list[str] = Field(default_factory=list)
+    captured_assets: list[str] = Field(default_factory=list)
 
 
 class CollectRunRequest(BaseModel):
@@ -132,10 +147,17 @@ class ProxyDealOption(BaseModel):
     coupon_id: str | None = None
     coupon_discount_jpy: int
     is_recommended: bool
+    is_recommended_by_risk_adjusted_cost: bool = False
+    risk_adjusted_total_cost_jpy: int
+    first_time_penalty_jpy: int = 0
+    compatible_with_marketplace: bool = True
+    compatibility_note: str | None = None
 
 
 class ProxyDealsForListingResponse(BaseModel):
     listing_id: str
+    recommended_proxy_by_expected_profit: str | None = None
+    best_proxy_by_risk_adjusted_cost: str | None = None
     options: list[ProxyDealOption]
 
 
@@ -221,6 +243,9 @@ class HealthMetricsResponse(BaseModel):
     latest_retrain_failure_reason: str | None = None
     active_model_versions: dict[str, str | None] = Field(default_factory=dict)
     model_age_hours: dict[str, float | None] = Field(default_factory=dict)
+    recent_non_stale_listing_count: int = 0
+    latest_non_stale_listing_at: datetime | None = None
+    listing_freshness_hours: float | None = None
     alerts: list[str] = Field(default_factory=list)
 
 
@@ -245,4 +270,6 @@ class TaxonomyTypeEntry(BaseModel):
 class TaxonomyStandardResponse(BaseModel):
     categories: dict[str, list[str]] = Field(default_factory=dict)
     conditions: list[str] = Field(default_factory=list)
+    condition_taxonomy: list[dict[str, str]] = Field(default_factory=list)
+    damage_flag_taxonomy: list[str] = Field(default_factory=list)
     types: list[TaxonomyTypeEntry] = Field(default_factory=list)

@@ -1,9 +1,11 @@
 from fastapi.testclient import TestClient
 from datetime import datetime, timedelta, timezone
+import json
 
 from app.core.config import get_settings
 from app.db import SessionLocal, init_db
 from app.main import app
+from app.models import RawListing
 from app.services import ops_telemetry
 from app.services import monitoring
 from app.services.pipeline import run_collection_pipeline
@@ -32,6 +34,9 @@ def test_health_metrics_endpoint_returns_expected_shape():
     assert "retrain_failure_count" in payload
     assert "active_model_versions" in payload
     assert "model_age_hours" in payload
+    assert "recent_non_stale_listing_count" in payload
+    assert "latest_non_stale_listing_at" in payload
+    assert "listing_freshness_hours" in payload
     assert "alerts" in payload
 
 
@@ -93,4 +98,85 @@ def test_health_metrics_alerts_when_active_models_are_stale(monkeypatch):
 
     assert "model_stale:resale" in metrics.alerts
     assert "model_stale:auction" in metrics.alerts
+    get_settings.cache_clear()
+
+
+def test_health_metrics_listing_freshness_excludes_fixture_stale_rows(monkeypatch):
+    init_db()
+    ops_telemetry.reset_operational_telemetry()
+    monkeypatch.setenv("MONITORING_MIN_SOURCE_COUNT", "0")
+    monkeypatch.setenv("MONITORING_MAX_LISTING_STALENESS_HOURS", "12")
+    get_settings.cache_clear()
+
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as session:
+        session.query(RawListing).delete()
+        session.commit()
+
+        session.add(
+            RawListing(
+                source="mercari",
+                source_listing_id="freshness-real",
+                url="https://example.com/real",
+                title="Real listing",
+                description_raw="",
+                images_json="[]",
+                seller_id="s1",
+                seller_rating=5.0,
+                listing_format="buy_now",
+                current_price_jpy=12000,
+                price_buy_now_jpy=12000,
+                domestic_shipping_jpy=800,
+                bid_count=None,
+                listed_at=now - timedelta(hours=13),
+                ends_at=None,
+                location_prefecture=None,
+                condition_text=None,
+                lot_size_hint=1,
+                raw_attributes_json=json.dumps({}),
+                updated_at=now - timedelta(hours=13),
+            )
+        )
+        session.add(
+            RawListing(
+                source="mercari",
+                source_listing_id="freshness-fixture",
+                url="https://example.com/fixture",
+                title="Fixture stale listing",
+                description_raw="",
+                images_json="[]",
+                seller_id="s2",
+                seller_rating=5.0,
+                listing_format="buy_now",
+                current_price_jpy=10000,
+                price_buy_now_jpy=10000,
+                domestic_shipping_jpy=800,
+                bid_count=None,
+                listed_at=now - timedelta(minutes=15),
+                ends_at=None,
+                location_prefecture=None,
+                condition_text=None,
+                lot_size_hint=1,
+                raw_attributes_json=json.dumps({"fixture_stale_fallback": True}),
+                updated_at=now - timedelta(minutes=15),
+            )
+        )
+        session.commit()
+
+        stale_metrics = monitoring.build_health_metrics(session, window_hours=24)
+        assert "listing_data_stale" in stale_metrics.alerts
+        assert stale_metrics.latest_non_stale_listing_at is not None
+        assert stale_metrics.listing_freshness_hours is not None
+        assert stale_metrics.listing_freshness_hours > 12.0
+
+        non_stale = session.query(RawListing).filter(RawListing.source_listing_id == "freshness-real").one()
+        non_stale.updated_at = now - timedelta(minutes=5)
+        session.add(non_stale)
+        session.commit()
+
+        fresh_metrics = monitoring.build_health_metrics(session, window_hours=24)
+        assert "listing_data_stale" not in fresh_metrics.alerts
+        assert fresh_metrics.listing_freshness_hours is not None
+        assert fresh_metrics.listing_freshness_hours < 1.0
+
     get_settings.cache_clear()

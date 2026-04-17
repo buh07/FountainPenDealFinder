@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     worker_ending_auction_window_hours: int = 24
     worker_priority_window_hours: int = 2
     priority_score_threshold: float = 0.55
+    priority_value_reference_jpy_ceiling: int = 180000
 
     resale_model_artifact_path: str = "models/resale/baseline_v1.json"
     auction_model_artifact_path: str = "models/yahoo-auction/baseline_v1.json"
@@ -77,6 +78,9 @@ class Settings(BaseSettings):
     baseline_eval_min_rows: int = 5
     baseline_eval_resale_max_mape: float = 0.5
     baseline_eval_auction_max_mape: float = 0.4
+    baseline_eval_require_holdout: bool = True
+    baseline_eval_bootstrap_samples: int = 1000
+    baseline_eval_significance_alpha: float = 0.05
 
     monitoring_min_source_count: int = 1
     monitoring_min_parse_completeness: float = 0.65
@@ -88,6 +92,7 @@ class Settings(BaseSettings):
     monitoring_alert_retry_attempts: int = 3
     monitoring_alert_retry_backoff_seconds: float = 1.0
     monitoring_max_model_age_hours: int = 24 * 30
+    monitoring_max_listing_staleness_hours: int = 12
     worker_dispatch_health_alerts: bool = False
     worker_health_alert_window_hours: int = 24
 
@@ -113,8 +118,12 @@ class Settings(BaseSettings):
     image_classifier_enabled: bool = False
     image_embedding_model_name: str = "local-hash-v1"
     image_classifier_blend_min_confidence: float = 0.6
+    classification_calibration_min_rows: int = 30
+    classification_calibration_bin_count: int = 10
     proxy_coupon_max_exact_stackable: int = 16
     proxy_coupon_fallback_top_stackable: int = 12
+    proxy_first_time_user_penalty_jpy: int = 350
+    resale_brand_min_samples: int = 3
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -143,16 +152,30 @@ class Settings(BaseSettings):
             raise ValueError("MONITORING_ALERT_RETRY_BACKOFF_SECONDS must be >= 0")
         if self.monitoring_max_model_age_hours < 1:
             raise ValueError("MONITORING_MAX_MODEL_AGE_HOURS must be >= 1")
+        if self.monitoring_max_listing_staleness_hours < 1:
+            raise ValueError("MONITORING_MAX_LISTING_STALENESS_HOURS must be >= 1")
+        if self.baseline_eval_bootstrap_samples < 100:
+            raise ValueError("BASELINE_EVAL_BOOTSTRAP_SAMPLES must be >= 100")
+        if not 0.0 < self.baseline_eval_significance_alpha < 1.0:
+            raise ValueError("BASELINE_EVAL_SIGNIFICANCE_ALPHA must be in (0, 1)")
         if self.worker_priority_interval_seconds < 60:
             raise ValueError("WORKER_PRIORITY_INTERVAL_SECONDS must be >= 60")
         if self.worker_priority_window_hours < 1:
             raise ValueError("WORKER_PRIORITY_WINDOW_HOURS must be >= 1")
         if not 0.0 <= self.priority_score_threshold <= 1.0:
             raise ValueError("PRIORITY_SCORE_THRESHOLD must be in [0, 1]")
+        if self.priority_value_reference_jpy_ceiling < 1:
+            raise ValueError("PRIORITY_VALUE_REFERENCE_JPY_CEILING must be >= 1")
         if self.object_store_thumbnail_max_px < 32:
             raise ValueError("OBJECT_STORE_THUMBNAIL_MAX_PX must be >= 32")
         if not 0.0 <= self.image_classifier_blend_min_confidence <= 1.0:
             raise ValueError("IMAGE_CLASSIFIER_BLEND_MIN_CONFIDENCE must be in [0, 1]")
+        if self.classification_calibration_min_rows < 5:
+            raise ValueError("CLASSIFICATION_CALIBRATION_MIN_ROWS must be >= 5")
+        if self.classification_calibration_bin_count < 2:
+            raise ValueError("CLASSIFICATION_CALIBRATION_BIN_COUNT must be >= 2")
+        if self.resale_brand_min_samples < 1:
+            raise ValueError("RESALE_BRAND_MIN_SAMPLES must be >= 1")
         if self.proxy_coupon_max_exact_stackable < 1:
             raise ValueError("PROXY_COUPON_MAX_EXACT_STACKABLE must be >= 1")
         if self.proxy_coupon_fallback_top_stackable < 1:
@@ -161,6 +184,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "PROXY_COUPON_FALLBACK_TOP_STACKABLE must be <= PROXY_COUPON_MAX_EXACT_STACKABLE"
             )
+        if self.proxy_first_time_user_penalty_jpy < 0:
+            raise ValueError("PROXY_FIRST_TIME_USER_PENALTY_JPY must be >= 0")
         allowed_capture_policies = {
             "none",
             "all",

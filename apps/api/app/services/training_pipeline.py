@@ -1,9 +1,16 @@
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from ..core.config import get_settings
-from .model_registry import fallback_artifact_path, promote_candidate_artifact, switch_active_to_version
+from .model_registry import (
+    fallback_artifact_path,
+    promote_candidate_artifact,
+    resolve_active_artifact_path,
+    switch_active_to_version,
+)
 from .ops_telemetry import record_retrain_failure
 from .pricing_models import clear_model_artifact_cache
 
@@ -12,47 +19,87 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
+def _snapshot_active_artifacts(tmp_dir: Path) -> dict[str, Path]:
+    snapshots: dict[str, Path] = {}
+    for task in ("resale", "auction"):
+        try:
+            active_path = resolve_active_artifact_path(task)
+        except Exception:
+            continue
+        if not active_path.exists():
+            continue
+        target_path = tmp_dir / f"{task}_active_snapshot.json"
+        shutil.copy2(active_path, target_path)
+        snapshots[task] = target_path
+    return snapshots
+
+
 def run_baseline_training_pipeline() -> tuple[str, str]:
     root = _repo_root()
     python_executable = sys.executable
     settings = get_settings()
 
-    build_cmd = [python_executable, str(root / "scripts" / "build_historical_datasets.py")]
-    train_cmd = [python_executable, str(root / "scripts" / "train_baseline_models.py")]
-    eval_cmd = [
-        python_executable,
-        str(root / "scripts" / "evaluate_baseline_models.py"),
-        "--min-rows",
-        str(settings.baseline_eval_min_rows),
-        "--resale-max-mape",
-        str(settings.baseline_eval_resale_max_mape),
-        "--auction-max-mape",
-        str(settings.baseline_eval_auction_max_mape),
-        "--report-path",
-        settings.baseline_eval_report_path,
-    ]
+    with tempfile.TemporaryDirectory(prefix="fpdf_retrain_ref_") as tmp_root_str:
+        tmp_root = Path(tmp_root_str)
+        reference_snapshots = _snapshot_active_artifacts(tmp_root)
 
-    build_proc = subprocess.run(
-        build_cmd,
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    train_proc = subprocess.run(
-        train_cmd,
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    eval_proc = subprocess.run(
-        eval_cmd,
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+        build_cmd = [python_executable, str(root / "scripts" / "build_historical_datasets.py")]
+        train_cmd = [
+            python_executable,
+            str(root / "scripts" / "train_baseline_models.py"),
+            "--resale-brand-min-samples",
+            str(settings.resale_brand_min_samples),
+        ]
+        eval_cmd = [
+            python_executable,
+            str(root / "scripts" / "evaluate_baseline_models.py"),
+            "--min-rows",
+            str(settings.baseline_eval_min_rows),
+            "--resale-max-mape",
+            str(settings.baseline_eval_resale_max_mape),
+            "--auction-max-mape",
+            str(settings.baseline_eval_auction_max_mape),
+            "--report-path",
+            settings.baseline_eval_report_path,
+            "--bootstrap-samples",
+            str(settings.baseline_eval_bootstrap_samples),
+            "--significance-alpha",
+            str(settings.baseline_eval_significance_alpha),
+        ]
+
+        if settings.baseline_eval_require_holdout:
+            eval_cmd.append("--require-holdout")
+        else:
+            eval_cmd.append("--no-require-holdout")
+
+        resale_reference = reference_snapshots.get("resale")
+        auction_reference = reference_snapshots.get("auction")
+        if resale_reference is not None:
+            eval_cmd.extend(["--reference-resale-artifact", str(resale_reference)])
+        if auction_reference is not None:
+            eval_cmd.extend(["--reference-auction-artifact", str(auction_reference)])
+
+        build_proc = subprocess.run(
+            build_cmd,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        train_proc = subprocess.run(
+            train_cmd,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        eval_proc = subprocess.run(
+            eval_cmd,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     details = "\n".join(
         [

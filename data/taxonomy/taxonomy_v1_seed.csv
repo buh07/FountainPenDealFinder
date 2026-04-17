@@ -1,4 +1,61 @@
 brand,line,model_alias,finish,nib_material,nib_size
+Pilot,Custom 74,custom 74,Black,14k,F
+Pilot,Custom 74,custom74,Black,14k,M
+Pilot,Custom 91,custom 91,Black,14k,F
+Pilot,Custom 912,custom 912,Black,14k,M
+Pilot,Custom 912,custom912,Black,14k,F
+Pilot,Custom 742,custom 742,Black,14k,M
+Pilot,Custom 743,custom 743,Black,14k,M
 Pilot,Custom 743,カスタム743,Black,14k,M
+Pilot,Custom 823,custom 823,Amber,14k,M
+Pilot,Custom 823,カスタム823,Smoke,14k,F
+Pilot,Custom 845,custom 845,Urushi,18k,M
+Pilot,Custom Urushi,custom urushi,Urushi,18k,M
+Pilot,Capless,capless,Black,18k,F
+Pilot,Capless,vanishing point,Black,18k,M
+Pilot,Elite 95S,elite 95s,Black,14k,F
+Pilot,Justus 95,justus 95,Black,14k,M
+Pilot,Falcon,falcon,Black,14k,SF
+Namiki,Yukari,yukari,Urushi,18k,M
+Namiki,Yukari,ナミキ ユカリ,Urushi,18k,F
+Namiki,Yukari Royale,yukari royale,Urushi,18k,M
+Namiki,Emperor,emperor,Urushi,18k,M
+Namiki,Emperor,namiki no 50,Urushi,18k,B
+Namiki,Chinkin,chinkin,Urushi,18k,M
+Sailor,1911 Standard,1911 standard,Black,21k,F
+Sailor,1911 Standard,1911s,Black,21k,M
+Sailor,1911 Large,1911 large,Black,21k,F
+Sailor,1911 Large,1911l,Black,21k,F
 Sailor,1911 Large,1911L,Black,21k,F
+Sailor,Pro Gear,pro gear,Black,21k,M
+Sailor,Pro Gear,pg,Black,21k,F
+Sailor,Pro Gear Slim,pro gear slim,Black,14k,F
+Sailor,Pro Gear Slim,pgs,Black,14k,MF
+Sailor,King of Pen,king of pen,Black,21k,B
+Sailor,King of Pen,kop,Black,21k,M
+Sailor,1911 Realo,realo,Black,21k,M
+Platinum,3776 Century,3776 century,Bourgogne,14k,EF
 Platinum,3776 Century,センチュリー,Bourgogne,14k,EF
+Platinum,3776 Century,#3776,Black,14k,F
+Platinum,Izumo,izumo,Urushi,18k,M
+Platinum,President,president,Black,18k,M
+Platinum,Curidas,curidas,Blue,Steel,F
+Nakaya,Portable Cigar,portable cigar,Urushi,14k,M
+Nakaya,Portable Cigar,ポータブルシガー,Urushi,14k,F
+Nakaya,Decapod,decapod,Urushi,14k,M
+Nakaya,Neo Standard,neo standard,Urushi,14k,F
+Nakaya,Dorsal Fin,dorsal fin,Urushi,14k,M
+Pelikan,M200,m200,Green,Steel,F
+Pelikan,M400,m400,Green,14k,F
+Pelikan,M600,m600,Black,14k,M
+Pelikan,M800,m800,Green,18k,M
+Pelikan,M800,souveran m800,Green,18k,F
+Pelikan,M805,m805,Black,18k,M
+Pelikan,M1000,m1000,Black,18k,B
+Montblanc,146,meisterstuck 146,Black,14k,M
+Montblanc,146,meisterstück 146,Black,14k,F
+Montblanc,149,meisterstuck 149,Black,18k,M
+Montblanc,149,meisterstück 149,Black,18k,B
+Montblanc,145,classique 145,Black,14k,F
+Montblanc,144,classique 144,Black,14k,EF
+Montblanc,Bohème,boheme,Black,14k,F

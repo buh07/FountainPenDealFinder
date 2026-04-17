@@ -1,6 +1,10 @@
+from datetime import datetime, timezone
+
+from app.db import SessionLocal, init_db
+from app.models import RawListing
 from app.models import CouponRule
 from app.core.config import get_settings
-from app.services.proxy_tracker import _pick_coupon_set
+from app.services.proxy_tracker import _pick_coupon_set, estimate_proxy_deals
 
 
 def _rule(
@@ -84,3 +88,70 @@ def test_coupon_optimizer_caps_stackable_search_space(monkeypatch):
     assert discount == 670
     assert coupon_id == "nonstack+stack_18+stack_19+stack_20"
     get_settings.cache_clear()
+
+
+def _listing(source: str, raw_attributes_json: str = "{}") -> RawListing:
+    now = datetime.now(timezone.utc)
+    return RawListing(
+        source=source,
+        source_listing_id=f"src-{source}",
+        url=f"https://example.com/{source}",
+        title="Pilot Custom",
+        description_raw="",
+        images_json="[]",
+        seller_id="seller-1",
+        seller_rating=5.0,
+        listing_format="buy_now",
+        current_price_jpy=30000,
+        price_buy_now_jpy=30000,
+        domestic_shipping_jpy=800,
+        bid_count=None,
+        listed_at=now,
+        ends_at=None,
+        location_prefecture=None,
+        condition_text=None,
+        lot_size_hint=1,
+        raw_attributes_json=raw_attributes_json,
+    )
+
+
+def test_proxy_estimation_applies_first_time_penalty_from_raw_attributes(monkeypatch):
+    monkeypatch.setenv("PROXY_FIRST_TIME_USER_PENALTY_JPY", "500")
+    get_settings.cache_clear()
+    init_db()
+
+    with SessionLocal() as session:
+        listing = _listing("mercari", raw_attributes_json='{"proxy_first_time_user":["Buyee"]}')
+        session.add(listing)
+        session.commit()
+
+        payloads = estimate_proxy_deals(
+            session,
+            listing,
+            buy_price_jpy=30000,
+            resale_reference_jpy=50000,
+        )
+
+    buyee = next(item for item in payloads if item["proxy_name"] == "Buyee")
+    assert buyee["first_time_penalty_jpy"] == 500
+    assert buyee["total_cost_jpy"] >= 30000 + 800 + 500
+    assert buyee["risk_adjusted_total_cost_jpy"] >= buyee["total_cost_jpy"]
+    get_settings.cache_clear()
+
+
+def test_proxy_estimation_filters_incompatible_proxy_marketplaces():
+    init_db()
+    with SessionLocal() as session:
+        listing = _listing("yahoo_flea_market")
+        session.add(listing)
+        session.commit()
+
+        payloads = estimate_proxy_deals(
+            session,
+            listing,
+            buy_price_jpy=30000,
+            resale_reference_jpy=50000,
+        )
+
+    proxy_names = {item["proxy_name"] for item in payloads}
+    assert "Neokyo" not in proxy_names

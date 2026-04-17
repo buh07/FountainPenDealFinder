@@ -23,6 +23,56 @@ except ImportError:  # pragma: no cover
 
 CANONICAL_CONDITIONS = ["A", "B+", "B", "C", "Parts/Repair"]
 
+CONDITION_TAXONOMY = [
+    {
+        "grade": "A",
+        "label": "Excellent",
+        "notes": "Near-mint with minimal visible wear and no known functional issues.",
+    },
+    {
+        "grade": "B+",
+        "label": "Very Good",
+        "notes": "Light signs of use; functional condition expected to be good.",
+    },
+    {
+        "grade": "B",
+        "label": "Good Used",
+        "notes": "Typical used wear with no severe structural defect observed.",
+    },
+    {
+        "grade": "C",
+        "label": "Risky Condition",
+        "notes": "Visible defects or uncertain functionality requiring review.",
+    },
+    {
+        "grade": "Parts/Repair",
+        "label": "Parts/Repair",
+        "notes": "Known defect, missing parts, or sold as repair/junk.",
+    },
+]
+
+DAMAGE_FLAG_TAXONOMY = [
+    "micro_scratches",
+    "deep_scratches",
+    "dent_or_ding",
+    "trim_wear",
+    "plating_wear",
+    "cap_band_damage",
+    "clip_damage",
+    "hairline_crack",
+    "thread_damage",
+    "barrel_staining",
+    "nib_tipping_unclear",
+    "bent_nib_possible",
+    "misaligned_tines_possible",
+    "feed_issue_possible",
+    "urushi_damage",
+    "maki_e_wear",
+    "name_engraving",
+    "missing_converter",
+    "missing_box",
+]
+
 
 DEFAULT_BRAND_CATEGORIES = {
     "Namiki": "japanese_premium",
@@ -485,6 +535,8 @@ def taxonomy_standard() -> dict[str, Any]:
     return {
         "categories": categories,
         "conditions": list(CANONICAL_CONDITIONS),
+        "condition_taxonomy": list(CONDITION_TAXONOMY),
+        "damage_flag_taxonomy": list(DAMAGE_FLAG_TAXONOMY),
         "types": [
             {
                 "brand": entry.brand,

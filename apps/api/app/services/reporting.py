@@ -1,7 +1,7 @@
 import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -19,6 +19,8 @@ from ..models import (
 )
 from ..schemas import DailyReportResponse, ListingItem, ListingSummary
 from .listing_quality import derive_price_status, get_default_timezone, local_day_bounds_utc, to_utc
+
+RankingView = Literal["risk_adjusted", "flat_profit", "percent_profit"]
 
 
 def _repo_root() -> Path:
@@ -81,6 +83,15 @@ def _listing_summary_from_related(
         (listing.price_buy_now_jpy or listing.current_price_jpy)
         + (listing.domestic_shipping_jpy or 0)
     )
+    image_urls = _from_json(listing.images_json, [])
+    if not isinstance(image_urls, list):
+        image_urls = []
+    image_urls = [str(url).strip() for url in image_urls if str(url).strip()]
+
+    stage_explanations: dict[str, Any] = {}
+    image_evidence = _from_json(classification.image_evidence if classification else None, None)
+    if isinstance(image_evidence, dict):
+        stage_explanations["stage2_image"] = image_evidence
 
     price_status = derive_price_status(
         listing.current_price_jpy,
@@ -99,6 +110,7 @@ def _listing_summary_from_related(
         marketplace=listing.source,
         listing_title=listing.title,
         listing_url=listing.url,
+        image_urls=image_urls,
         seller_id=listing.seller_id,
         listing_type="auction" if listing.listing_format == "auction" else "buy_now",
         price_status=price_status,
@@ -108,6 +120,19 @@ def _listing_summary_from_related(
         expected_profit_jpy=(deal.expected_profit_jpy if deal else 0),
         expected_profit_pct=(deal.expected_profit_pct if deal else 0.0),
         confidence=(deal.confidence_overall if deal else 0.0),
+        classification_confidence=(
+            classification.classification_confidence if classification else None
+        ),
+        condition_confidence=(
+            classification.condition_confidence if classification else None
+        ),
+        lot_decomposition_confidence=(
+            classification.lot_decomposition_confidence if classification else None
+        ),
+        valuation_confidence=(valuation.valuation_confidence if valuation else None),
+        auction_confidence=(auction.auction_confidence if auction else None),
+        cost_confidence=(proxy.cost_confidence if proxy else None),
+        stage_explanations=stage_explanations,
         auction_low_win_price_jpy=(
             auction.auction_low_win_price_jpy if auction else None
         ),
@@ -213,6 +238,10 @@ def list_ranked_listings(
     bucket: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    sort_by: RankingView = "risk_adjusted",
+    listing_type: Literal["auction", "buy_now"] | None = None,
+    since: datetime | None = None,
+    ending_within_hours: int | None = None,
     report_date: date | None = None,
     generated_at: datetime | None = None,
 ) -> list[ListingSummary]:
@@ -220,10 +249,16 @@ def list_ranked_listings(
     if report_date is not None and generated_at is not None:
         query_limit = max((limit + max(0, offset)) * 5, 100)
 
+    order_column = DealScore.risk_adjusted_profit_jpy
+    if sort_by == "flat_profit":
+        order_column = DealScore.expected_profit_jpy
+    elif sort_by == "percent_profit":
+        order_column = DealScore.expected_profit_pct
+
     stmt = (
         select(RawListing)
         .join(DealScore, DealScore.listing_id == RawListing.listing_id)
-        .order_by(DealScore.risk_adjusted_profit_jpy.desc())
+        .order_by(order_column.desc(), DealScore.updated_at.desc())
         .limit(query_limit)
     )
 
@@ -234,6 +269,23 @@ def list_ranked_listings(
         stmt = stmt.where(DealScore.bucket == bucket)
     else:
         stmt = stmt.where(DealScore.bucket.in_(["confident", "potential"]))
+
+    if listing_type:
+        stmt = stmt.where(RawListing.listing_format == listing_type)
+
+    if since is not None:
+        normalized_since = to_utc(since)
+        if normalized_since is not None:
+            stmt = stmt.where(RawListing.updated_at >= normalized_since)
+
+    if ending_within_hours is not None:
+        now = datetime.now(timezone.utc)
+        window_end = now + timedelta(hours=max(1, ending_within_hours))
+        stmt = stmt.where(
+            RawListing.ends_at.is_not(None),
+            RawListing.ends_at >= now,
+            RawListing.ends_at < window_end,
+        )
 
     listings = session.scalars(stmt).all()
 
@@ -255,6 +307,9 @@ def count_ranked_listings(
     session: Session,
     source: str | None = None,
     bucket: str | None = None,
+    listing_type: Literal["auction", "buy_now"] | None = None,
+    since: datetime | None = None,
+    ending_within_hours: int | None = None,
 ) -> int:
     stmt = select(func.count()).select_from(RawListing).join(
         DealScore,
@@ -266,6 +321,23 @@ def count_ranked_listings(
         stmt = stmt.where(DealScore.bucket == bucket)
     else:
         stmt = stmt.where(DealScore.bucket.in_(["confident", "potential"]))
+
+    if listing_type:
+        stmt = stmt.where(RawListing.listing_format == listing_type)
+
+    if since is not None:
+        normalized_since = to_utc(since)
+        if normalized_since is not None:
+            stmt = stmt.where(RawListing.updated_at >= normalized_since)
+
+    if ending_within_hours is not None:
+        now = datetime.now(timezone.utc)
+        window_end = now + timedelta(hours=max(1, ending_within_hours))
+        stmt = stmt.where(
+            RawListing.ends_at.is_not(None),
+            RawListing.ends_at >= now,
+            RawListing.ends_at < window_end,
+        )
     return int(session.scalar(stmt) or 0)
 
 

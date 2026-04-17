@@ -25,3 +25,9 @@ logs/
 artifacts/
 data/reports/*.md
 !data/reports/.gitkeep
+
+# Raw downloaded images (large binary files — regenerate with collect_pen_images.py)
+data/images/raw/
+
+# Large scraped review CSVs (regenerate with scrape_training_data.py)
+data/labeled/review/*.csv
